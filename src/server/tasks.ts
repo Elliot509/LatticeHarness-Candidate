@@ -133,11 +133,23 @@ export class TaskManager {
       throw new Error("workspace directory is not readable");
     }
     const root = path.resolve(this.serverWorkspace);
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = fs.realpathSync.native(root);
+    } catch {
+      throw new Error("workspace directory is not readable");
+    }
     const dirs: Array<{ name: string; path: string }> = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
       const child = path.resolve(resolved, entry.name);
-      if (child !== root && !child.startsWith(`${root}${path.sep}`)) continue;
+      let canonicalChild: string;
+      try {
+        canonicalChild = fs.realpathSync.native(child);
+      } catch {
+        continue;
+      }
+      if (canonicalChild !== canonicalRoot && !canonicalChild.startsWith(`${canonicalRoot}${path.sep}`)) continue;
       dirs.push({ name: entry.name, path: child });
       if (dirs.length >= 200) break;
     }
@@ -378,10 +390,14 @@ export class TaskManager {
   }
 
   private resolveWorkspace(requested: string): string {
-    const resolved = resolveInScope(this.serverWorkspace, requested === "" ? "." : requested);
-    if (resolved === null) {
+    // Containment is decided on canonical paths (symlink-free) so a link
+    // inside the root cannot point outside of it; the returned path stays
+    // lexical to preserve exact scope strings, snapshots and UI display.
+    if (resolveInScope(this.serverWorkspace, requested === "" ? "." : requested) === null) {
       throw new Error("workspace must stay inside the server workspace");
     }
+    const root = path.resolve(this.serverWorkspace);
+    const resolved = path.resolve(root, requested === "" ? "." : requested);
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
       throw new Error("workspace directory does not exist");
     }

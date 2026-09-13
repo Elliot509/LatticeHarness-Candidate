@@ -318,6 +318,32 @@ describe("provider HTTP surfaces", () => {
 });
 
 describe("mediated workspace picker", () => {
+  it("keeps lexical workspace strings when the server root passes through a link", async () => {
+    const { dir, db } = setup();
+    const real = path.join(dir, "ws");
+    const alias = path.join(dir, "alias-ws");
+    try {
+      fs.symlinkSync(real, alias, process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      console.warn("symlinks unavailable; linked-root test skipped");
+      return;
+    }
+    const server = await serve(db, alias);
+    const cookie = await authed(server.url);
+    const info = await (await fetch(`${server.url}/api/info`, { headers: { Cookie: cookie } })).json() as { workspace: string };
+    expect(info.workspace).toBe(alias);
+    const body = await (await fetch(`${server.url}/api/workspace/browse?path=`, { headers: { Cookie: cookie } })).json() as {
+      entries: Array<{ name: string }>;
+    };
+    expect(body.entries.map((entry) => entry.name)).toContain("proj espaço");
+    const resolved = await (await fetch(`${server.url}/api/workspace/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie, Origin: server.url },
+      body: JSON.stringify({ path: "proj espaço" }),
+    })).json() as { path: string };
+    expect(resolved.path).toBe(path.join(alias, "proj espaço"));
+  });
+
   it("browses child directories without recursion or dotfiles", async () => {
     const { workspace, db } = setup();
     const server = await serve(db, workspace);

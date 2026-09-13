@@ -156,7 +156,8 @@ export class SearchTool implements Tool<SearchArgs> {
       if (!complete) break;
     }
 
-    const scopeNote = `scope ${path.relative(context.workspaceRoot, scopeRoot) === "" ? "." : path.relative(context.workspaceRoot, scopeRoot)}, ${filesScanned} files read, ${filesSkipped} skipped (binary/oversize/unreadable), ignored: ${[...IGNORED_DIRS].join(",")}`;
+    const canonicalWorkspace = resolveInScope(context.workspaceRoot, ".") ?? path.resolve(context.workspaceRoot);
+    const scopeNote = `scope ${path.relative(canonicalWorkspace, scopeRoot) === "" ? "." : path.relative(canonicalWorkspace, scopeRoot)}, ${filesScanned} files read, ${filesSkipped} skipped (binary/oversize/unreadable), ignored: ${[...IGNORED_DIRS].join(",")}`;
     const errorNote = errors.length > 0 ? ` errors: ${errors.join(" | ")}` : "";
     if (complete) {
       return {
