@@ -1,0 +1,5 @@
+# Normalize all text to LF on checkout so fixtures, tests and scripts have
+# identical bytes on Linux and Windows. Local CRLF workspaces still work:
+# the edit tool matches literal bytes and preserves EOL, it just requires
+# EOL-exact oldText (covered by unit tests).
+* text=auto eol=lf

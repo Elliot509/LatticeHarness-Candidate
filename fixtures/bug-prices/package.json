@@ -1,0 +1,10 @@
+{
+  "name": "bug-prices-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "S1 fixture: bulk discount computed per item instead of on the subtotal.",
+  "scripts": {
+    "test": "node --test test/test.js"
+  }
+}

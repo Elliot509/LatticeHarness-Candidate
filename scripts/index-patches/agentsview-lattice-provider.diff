@@ -1,0 +1,57 @@
+diff --git a/internal/parser/provider.go b/internal/parser/provider.go
+index 1a823344..18f7c9f0 100644
+--- a/internal/parser/provider.go
++++ b/internal/parser/provider.go
+@@ -1172,6 +1172,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
+ 		return newDeepSeekTUIProviderFactory(def)
+ 	case AgentDeepSeekHarness:
+ 		return newDeepSeekHarnessProviderFactory(def)
++	case AgentLattice:
++		return newLatticeProviderFactory(def)
+ 	case AgentForge:
+ 		return newForgeProviderFactory(def)
+ 	case AgentDevin:
+diff --git a/internal/parser/provider_migration.go b/internal/parser/provider_migration.go
+index 47ea0393..c1e4ca4f 100644
+--- a/internal/parser/provider_migration.go
++++ b/internal/parser/provider_migration.go
+@@ -83,6 +83,7 @@ var providerMigrationModes = map[AgentType]ProviderMigrationMode{
+ 	AgentCodebuff:       ProviderMigrationProviderAuthoritative,
+ 
+ 	AgentDeepSeekHarness: ProviderMigrationProviderAuthoritative,
++	AgentLattice: ProviderMigrationProviderAuthoritative,
+ }
+ 
+ // ProviderMigrationModes returns the current provider migration manifest.
+diff --git a/internal/parser/types.go b/internal/parser/types.go
+index 34769b75..c5212f3e 100644
+--- a/internal/parser/types.go
++++ b/internal/parser/types.go
+@@ -72,6 +72,7 @@ const (
+ 	AgentGptme          AgentType = "gptme"
+ 	AgentQoder          AgentType = "qoder"
+ 	AgentShelley        AgentType = "shelley"
++	AgentLattice        AgentType = "lattice"
+ 	AgentAider          AgentType = "aider"
+ 	AgentReasonix       AgentType = "reasonix"
+ 	AgentEvener         AgentType = "evener"
+@@ -888,6 +889,19 @@ var Registry = []AgentDef{
+ 		IDPrefix:    "shelley:",
+ 		FileBased:   true,
+ 	},
++	{
++		// Lattice export snapshots are complete per-session accounting
++		// files written by the Lattice harness (`lattice export`), one
++		// JSONL file per session. Roots hold the snapshots flat; the
++		// session identity comes from file content, not from paths.
++		Type:        AgentLattice,
++		DisplayName: "Lattice",
++		EnvVar:      "LATTICE_EXPORTS_DIR",
++		ConfigKey:   "lattice_exports_dirs",
++		DefaultDirs: []string{".local/share/lattice/index/exports"},
++		IDPrefix:    "lattice:",
++		FileBased:   true,
++	},
+ 	{
+ 		Type:        AgentVibe,
+ 		DisplayName: "Mistral Vibe",

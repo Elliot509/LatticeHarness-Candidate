@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["22.13.0", "24.x"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - run: npm run pack:test
+
+  # Full-chain S4 validation against the REAL pinned tools. Clones upstream
+  # at pinned revisions into a temp dir (never into the repo), applies the
+  # local Lattice patches, builds the agentsview binary, and runs the
+  # ledger -> export -> adapter -> agentsview -> official client chain with
+  # a loopback stub (no real register, publish, or network). Linux-only:
+  # the agentsview build is CGO/sqlite-heavy; Windows keeps the hermetic
+  # unit coverage (node stubs) instead.
+  index-e2e:
+    runs-on: ubuntu-latest
+    env:
+      AGENTSVIEW_PIN: ed20f62ffddf304689cfb0fe8fb7dafa2ebd798f
+      AGENT_INDEX_CLIENT_PIN: 87901f8b182a8a7c65ee3dd7267f8f835ee2a545
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.0"
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: npm ci
+      - run: npm run build
+      - name: Clone pinned upstream tools
+        run: |
+          mkdir -p /tmp/s4up
+          git clone -q https://github.com/kenn-io/agentsview /tmp/s4up/agentsview
+          git -C /tmp/s4up/agentsview checkout -q "$AGENTSVIEW_PIN"
+          git clone -q https://github.com/plow-pbc/agent-index-client /tmp/s4up/agent-index-client
+          git -C /tmp/s4up/agent-index-client checkout -q "$AGENT_INDEX_CLIENT_PIN"
+      - name: Apply local Lattice patches
+        run: node scripts/apply-index-patches.mjs /tmp/s4up/agentsview /tmp/s4up/agent-index-client
+      - name: Build patched agentsview
+        run: |
+          export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache GOPATH=/tmp/gopath
+          go generate ./internal/pricing/
+          go test ./internal/parser/ -run 'TestParseLattice'
+          go build -o /tmp/s4up/agentsview-bin ./cmd/agentsview
+        working-directory: /tmp/s4up/agentsview
+      - name: Run the full index chain
+        run: npx vitest run tests/integration/index-e2e.test.ts
+        env:
+          LATTICE_AGENTS_VIEW: /tmp/s4up/agentsview-bin
+          LATTICE_INDEX_CLIENT: /tmp/s4up/agent-index-client/standalone/agent_index_client.py

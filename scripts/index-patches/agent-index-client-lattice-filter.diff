@@ -1,0 +1,98 @@
+diff --git a/standalone/agent_index_client.py b/standalone/agent_index_client.py
+index 4d8095f..03e9fd4 100755
+--- a/standalone/agent_index_client.py
++++ b/standalone/agent_index_client.py
+@@ -405,6 +405,41 @@ def token():
+              + WHERE_TO_GET_A_TOKEN)
+ 
+ 
++def _agentsview_agents():
++    """Agent names the agentsview query is restricted to, if any.
++
++    Read from AGENT_INDEX_AGENTS (comma-separated). Unset means the historic
++    behaviour: whatever agentsview covers. A harness that must attribute only
++    its own usage sets this to its own agent name so other agents sharing the
++    index can never leak into its report."""
++    return [name for name in (part.strip() for part in
++            os.environ.get("AGENT_INDEX_AGENTS", "").split(",")) if name]
++
++
++def _agentsview_argv(exe):
++    argv = [exe, "usage", "daily", "--json"]
++    for name in _agentsview_agents():
++        argv += ["--agent", name]
++    return argv
++
++
++def _parse_agentsview_output(completed):
++    """Collector rows from a finished agentsview run, or {} with a recorded
++    failure. A non-zero exit is a failure even when stdout still parses:
++    trusting the JSON alone let a broken agentsview publish whatever partial
++    output it managed before dying."""
++    if completed.returncode != 0:
++        FAILURES.append(f"agentsview: exit {completed.returncode}: "
++                        f"{(completed.stderr or '').strip()[:300]}")
++        return []
++    try:
++        rows = json.loads(completed.stdout)
++    except Exception as e:
++        FAILURES.append(f"agentsview: {type(e).__name__}: {e}")
++        return []
++    return rows if isinstance(rows, list) else rows.get("daily") or rows.get("data") or []
++
++
+ def from_agentsview(days):
+     """date -> model -> counters, for whatever agentsview covers."""
+     exe = next((p for p in (os.path.expanduser("~/.local/bin/agentsview"),
+@@ -414,15 +449,14 @@ def from_agentsview(days):
+         print("  agentsview not installed — skipping that collector")
+         return {}
+     try:
+-        raw = subprocess.run([exe, "usage", "daily", "--json"], capture_output=True,
+-                             text=True, timeout=120, env=_child_env()).stdout
+-        rows = json.loads(raw)
++        completed = subprocess.run(_agentsview_argv(exe), capture_output=True,
++                                   text=True, timeout=120, env=_child_env())
++        rows = _parse_agentsview_output(completed)
+     except Exception as e:
+         # Say it. Swallowing this made a broken agentsview indistinguishable
+         # from an agent that did nothing, and the index would show it idle.
+         FAILURES.append(f"agentsview: {type(e).__name__}: {e}")
+         return {}
+-    rows = rows if isinstance(rows, list) else rows.get("daily") or rows.get("data") or []
+     out = {}
+     for r in rows[-days:]:
+         models = {}
+@@ -501,7 +535,7 @@ AGENTSVIEW_SOURCE_DIRS = (
+     "CLAUDE_PROJECTS_DIR", "CODEX_SESSIONS_DIR", "COPILOT_DIR", "GEMINI_DIR",
+     "OPENCODE_DIR", "CURSOR_PROJECTS_DIR", "IFLOW_DIR", "AMP_DIR", "ZED_DIR",
+     "QWEN_PROJECTS_DIR", "QWENPAW_DIR", "OMP_DIR", "DEEPSEEK_TUI_SESSIONS_DIR",
+-    "QCLAW_DIR", "WORKBUDDY_PROJECTS_DIR", "PIEBALD_DIR",
++    "QCLAW_DIR", "WORKBUDDY_PROJECTS_DIR", "PIEBALD_DIR", "LATTICE_EXPORTS_DIR",
+ )
+ 
+ 
+@@ -1107,6 +1141,23 @@ def self_check():
+     gpt = [x for x in m[1]["models"] if x["model"] == "gpt"][0]
+     assert gpt == {"model": "gpt", "input": 11, "output": 2, "cache_read": 5, "cache_write": 0}, gpt
+     assert merge({}, {}) == [], "no data must send no days, not a day of zeros"
++    # Agent-scoped collection: AGENT_INDEX_AGENTS restricts the agentsview
++    # query so other agents sharing the index cannot leak into this report.
++    # A non-zero agentsview exit is a failure even when stdout still parses.
++    import subprocess as _sp
++    assert _agentsview_argv("/bin/agentsview") == ["/bin/agentsview", "usage", "daily", "--json"], _agentsview_argv("/bin/agentsview")
++    os.environ["AGENT_INDEX_AGENTS"] = "lattice"
++    try:
++        assert _agentsview_argv("/bin/agentsview") == ["/bin/agentsview", "usage", "daily", "--json", "--agent", "lattice"]
++    finally:
++        del os.environ["AGENT_INDEX_AGENTS"]
++    ok = _sp.CompletedProcess(args=[], returncode=0, stdout='{"daily": [{"date": "2026-09-01", "modelBreakdowns": []}]}', stderr="")
++    assert _parse_agentsview_output(ok) == [{"date": "2026-09-01", "modelBreakdowns": []}]
++    nfailures = len(FAILURES)
++    bad = _sp.CompletedProcess(args=[], returncode=1, stdout='{"daily": []}', stderr="boom")
++    assert _parse_agentsview_output(bad) == [], "exit != 0 with valid JSON is still a failure"
++    assert len(FAILURES) == nfailures + 1, FAILURES
++    del FAILURES[nfailures:]
+     # A store somebody NAMED and that is not there is a failure, not silence.
+     # Asserted end to end further down -- running the client proves the whole
+     # consequence (non-zero exit, nothing posted), where poking FAILURES only

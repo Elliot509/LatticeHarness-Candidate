@@ -1,0 +1,57 @@
+# Internal documentation (local only, never public)
+docs/
+Regras/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+plow-credentials*
+
+# Runtime state and databases
+lattice.db
+lattice.db-wal
+lattice.db-shm
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+lattice.product.json
+
+# Local Agent Index / Plow integration state
+.agent-index/
+agent-index-client/
+agentsview-bin/
+lattice-pack-*
+.export-*
+usage.jsonl
+
+# Logs, traces and dumps
+*.log
+logs/
+*.trace
+dumps/
+
+# Build and cache output (rebuilt by CI/pack)
+node_modules/
+dist/
+*.tgz
+*.tsbuildinfo
+coverage/
+tmp/
+
+# Test artifacts and screenshots
+artifacts/
+test-results/
+playwright-report/
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
