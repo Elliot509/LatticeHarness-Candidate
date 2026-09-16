@@ -94,12 +94,21 @@ export function buildToolset(options: ToolsetOptions = {}): RegisteredToolEntry[
     {
       name: "process",
       definition: PROCESS_DEFINITION,
-      run: async (argsJson, _context) => {
+      run: async (argsJson, context) => {
         const supervisor = options.supervisor;
         if (supervisor === undefined) {
           throw new Error("process tool requires a supervisor for this run");
         }
-        return { result: await supervisor.execute(decodeArgs(argsJson) as unknown as ProcessOperation), argsSummary: argsJson };
+        const args = decodeArgs(argsJson) as unknown as ProcessOperation;
+        // The tool-context overlay authorizes extra child env for this
+        // dispatch only; merge it into the per-spawn args env explicitly so
+        // the supervisor boundary stays the single choke point.
+        const overlay = (context as { envOverlay?: Record<string, string> }).envOverlay;
+        const merged =
+          overlay !== undefined && Object.keys(overlay).length > 0 && args.op === "spawn"
+            ? { ...args, env: { ...(args.env ?? {}), ...overlay } }
+            : args;
+        return { result: await supervisor.execute(merged), argsSummary: argsJson };
       },
     },
   ];

@@ -12,6 +12,7 @@ import {
   unknownHistory,
 } from "../runtime/continuity.js";
 import { HandleWaiter, edgeWakeId, levelWakeId, listActiveWaits, recordWake } from "../runtime/wait.js";
+import { advanceCompositionEpoch, compositionForRoute } from "../runtime/composition.js";
 import { taskBudgetSnapshot } from "../runtime/effects.js";
 import { runTaskLoop, type LoopOptions, type LoopStop } from "../runtime/loop.js";
 import { buildToolset } from "../tools/registry.js";
@@ -434,6 +435,17 @@ export class TaskManager {
     };
     const modelRef = { provider: adapter, model: manifest.model };
     const tools = buildToolset({ supervisor });
+    // Composition epoch: opened/advanced exactly once per activation under
+    // the CURRENT route. Same route re-entry (refresh, reconnect, restart of
+    // a READY task) reuses the stored epoch — no inflation. A pendingModel
+    // switch advances it at the safe point (see selectModel/onLoopEvent).
+    // (The epoch value is durably stored; the local binding is informational
+    // here — model attempts bind per-request in the loop via bindRequest.)
+    advanceCompositionEpoch(
+      this.db,
+      taskId,
+      compositionForRoute(manifest.provider, manifest.model, tools.map((tool) => tool.definition)),
+    );
     // A start after resume continues under the original session with a fresh
     // run; the granted budget always comes from the persisted contract.
     const taskRun = this.openTaskRun(taskId);
@@ -521,17 +533,22 @@ export class TaskManager {
     return { accepted: true, commandId, taskId, revision: contract.revision, state: "RUNNING" };
   }
 
-  private readManifest(taskId: string): { provider: string; model: string; baseUrl: string | null } {
+  private readManifest(taskId: string): { provider: string; model: string; baseUrl: string | null; workspace: string } {
     const row = this.db.prepare("SELECT manifest FROM runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1").get(taskId) as
       | { manifest: string }
       | undefined;
     if (row === undefined) throw new Error(`no run for task ${taskId}`);
-    const manifest = JSON.parse(row.manifest) as { provider?: unknown; model?: unknown; baseUrl?: unknown };
+    const manifest = JSON.parse(row.manifest) as { provider?: unknown; model?: unknown; baseUrl?: unknown; workspace?: unknown };
     const manifestProvider = manifest.provider;
     if (typeof manifestProvider !== "string" || !isKnownProviderId(manifestProvider) || typeof manifest.model !== "string") {
       throw new Error(`unsupported run composition for task ${taskId}`);
     }
-    return { provider: manifestProvider, model: manifest.model, baseUrl: typeof manifest.baseUrl === "string" ? manifest.baseUrl : null };
+    return {
+      provider: manifestProvider,
+      model: manifest.model,
+      baseUrl: typeof manifest.baseUrl === "string" ? manifest.baseUrl : null,
+      workspace: typeof manifest.workspace === "string" ? manifest.workspace : "",
+    };
   }
 
   private buildAdapter(provider: string, baseUrl: string | null): ProviderAdapter {
@@ -649,6 +666,35 @@ export class TaskManager {
       }
     }
     live.pendingSteerings.clear();
+    // Safe-point route switch: the pending model becomes the CURRENT route
+    // exactly once, at a model-request boundary (never mid-dispatch), and
+    // advances the composition epoch. Late responses to older epochs stay
+    // evidence for their own attempts (see composition.ts) and never restore
+    // the previous route.
+    if (live.pendingModel !== null) {
+      const pending = live.pendingModel;
+      live.pendingModel = null;
+      try {
+        const manifest = this.readManifest(taskId);
+        const tools = buildToolset({});
+        const next = advanceCompositionEpoch(
+          this.db,
+          taskId,
+          compositionForRoute(pending.provider, pending.model, tools.map((tool) => tool.definition)),
+        );
+        this.db
+          .prepare("UPDATE runs SET manifest = ? WHERE task_id = ?")
+          .run(
+            JSON.stringify({ provider: pending.provider, model: pending.model, baseUrl: pending.baseUrl, workspace: manifest.workspace, packageVersion: PACKAGE_VERSION, compositionEpoch: next.epoch, compositionDigest: next.digest }),
+            taskId,
+          );
+        this.recordEvent(taskId, "composition", { provider: pending.provider, model: pending.model, baseUrl: pending.baseUrl, applied: true, epoch: next.epoch, digest: next.digest });
+      } catch {
+        // Fail closed on manifest/epoch errors: the switch does not apply,
+        // the loop continues on the current route with evidence preserved.
+        this.recordEvent(taskId, "composition", { provider: pending.provider, model: pending.model, applied: false, reason: "epoch advance failed" });
+      }
+    }
   }
 
   private onLoopStop(taskId: string, live: LiveRun, decision: string, reason: string, wait?: { kind: string }): void {

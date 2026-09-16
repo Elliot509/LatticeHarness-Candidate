@@ -86,6 +86,13 @@ export function openLatticeDb(dataDir: string): LatticeDb {
     raw.exec("PRAGMA journal_mode = WAL");
     raw.exec("PRAGMA synchronous = FULL");
     raw.exec("PRAGMA foreign_keys = ON");
+    // POST_R1_VERIFY PR1-001: bounded busy timeout so lock contention under
+    // multi-process ownership races blocks briefly instead of surfacing raw
+    // SQLITE_BUSY ("database is locked"). The ownership boundary promises a
+    // TYPED loser (OwnershipHeldError/Uncertain); without this, a loser's
+    // BEGIN IMMEDIATE can throw the untyped busy error. 5s matches the
+    // short-transaction discipline (ownership + migrations are ms-scale).
+    raw.exec("PRAGMA busy_timeout = 5000");
     migrate(raw);
   } catch (error) {
     try {
@@ -113,33 +120,53 @@ export function claimOwnership(
   db: DatabaseSync,
   processIdentity: string = defaultProcessIdentity(),
 ): OwnerClaim {
-  const existing = db
-    .prepare("SELECT generation, pid, process_identity FROM ownership WHERE id = 1")
-    .get() as
-    | { generation: number; pid: number; process_identity: string }
-    | undefined;
-  if (existing === undefined) {
+  // Serialized: two processes racing here must not both believe they own.
+  // BEGIN IMMEDIATE takes the write lock up front; the loser blocks, then
+  // reads the winner's row and fails closed with OwnershipHeldError (or
+  // takes over a provably-dead owner). Same-process re-claim stays cheap.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const existing = db
+      .prepare("SELECT generation, pid, process_identity FROM ownership WHERE id = 1")
+      .get() as
+      | { generation: number; pid: number; process_identity: string }
+      | undefined;
+    if (existing === undefined) {
+      db.prepare(
+        "INSERT INTO ownership (id, generation, pid, process_identity, claimed_at) VALUES (1, 1, ?, ?, ?)",
+      ).run(process.pid, processIdentity, new Date().toISOString());
+      db.exec("COMMIT");
+      return { generation: 1, pid: process.pid, processIdentity, fresh: true };
+    }
+    if (existing.pid === process.pid && existing.process_identity === processIdentity) {
+      db.exec("COMMIT");
+      return {
+        generation: existing.generation,
+        pid: process.pid,
+        processIdentity,
+        fresh: false,
+      };
+    }
+    if (ownerAlive(existing.pid)) {
+      db.exec("ROLLBACK");
+      throw new OwnershipHeldError(existing.pid, existing.generation);
+    }
+    const generation = existing.generation + 1;
     db.prepare(
-      "INSERT INTO ownership (id, generation, pid, process_identity, claimed_at) VALUES (1, 1, ?, ?, ?)",
-    ).run(process.pid, processIdentity, new Date().toISOString());
-    return { generation: 1, pid: process.pid, processIdentity, fresh: true };
+      "UPDATE ownership SET generation = ?, pid = ?, process_identity = ?, claimed_at = ? WHERE id = 1",
+    ).run(generation, process.pid, processIdentity, new Date().toISOString());
+    db.exec("COMMIT");
+    return { generation, pid: process.pid, processIdentity, fresh: false };
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // ROLLBACK after COMMIT throws (no transaction): the success paths
+      // above already committed, so only a failed COMMIT lands here with
+      // something to roll back. Best effort; original error wins.
+    }
+    throw error;
   }
-  if (existing.pid === process.pid && existing.process_identity === processIdentity) {
-    return {
-      generation: existing.generation,
-      pid: process.pid,
-      processIdentity,
-      fresh: false,
-    };
-  }
-  if (ownerAlive(existing.pid)) {
-    throw new OwnershipHeldError(existing.pid, existing.generation);
-  }
-  const generation = existing.generation + 1;
-  db.prepare(
-    "UPDATE ownership SET generation = ?, pid = ?, process_identity = ?, claimed_at = ? WHERE id = 1",
-  ).run(generation, process.pid, processIdentity, new Date().toISOString());
-  return { generation, pid: process.pid, processIdentity, fresh: false };
 }
 
 export function readOwnerGeneration(db: DatabaseSync): number | null {

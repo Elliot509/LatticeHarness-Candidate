@@ -1,7 +1,13 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { admitIntent, claimTicket, type ActionIntent } from "../../src/runtime/admission.js";
 import { BudgetLedger } from "../../src/runtime/budget.js";
 import { createContract, type TaskContract } from "../../src/runtime/contract.js";
+
+const WORKSPACE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "lattice-admission-ws-"));
+fs.mkdirSync(path.join(WORKSPACE_ROOT, "workspace", "src"), { recursive: true });
 
 function contract(): TaskContract {
   return createContract({
@@ -49,6 +55,7 @@ describe("admission and claim", () => {
       intent: intent(),
       contract: contract(),
       ledger: new BudgetLedger({ calls: 50, tokens: 200000 }),
+      workspaceRoot: WORKSPACE_ROOT,
       ownerGeneration: 3,
     });
     expect(result.admitted).toBe(true);
@@ -63,6 +70,7 @@ describe("admission and claim", () => {
       intent: intent({ operation: "exec" }),
       contract: contract(),
       ledger: new BudgetLedger({ calls: 50, tokens: 200000 }),
+      workspaceRoot: WORKSPACE_ROOT,
       ownerGeneration: 1,
     });
     expect(result).toMatchObject({ admitted: false, reason: "no-grant" });
@@ -73,6 +81,7 @@ describe("admission and claim", () => {
       intent: intent({ authorityRevision: 7 }),
       contract: contract(),
       ledger: new BudgetLedger({ calls: 50, tokens: 200000 }),
+      workspaceRoot: WORKSPACE_ROOT,
       ownerGeneration: 1,
     });
     expect(result).toMatchObject({ admitted: false, reason: "stale-revision" });
@@ -83,6 +92,7 @@ describe("admission and claim", () => {
       intent: intent(),
       contract: contract(),
       ledger: new BudgetLedger({ calls: 50, tokens: 200000 }),
+      workspaceRoot: WORKSPACE_ROOT,
       ownerGeneration: 0,
     });
     expect(result).toMatchObject({ admitted: false, reason: "stale-generation" });
@@ -93,6 +103,7 @@ describe("admission and claim", () => {
       intent: intent({ maxCalls: 51, maxTokens: 1 }),
       contract: contract(),
       ledger: new BudgetLedger({ calls: 50, tokens: 200000 }),
+      workspaceRoot: WORKSPACE_ROOT,
       ownerGeneration: 1,
     });
     expect(result).toMatchObject({ admitted: false, reason: "budget-exceeded" });
@@ -103,6 +114,7 @@ describe("admission and claim", () => {
       intent: intent(),
       contract: contract(),
       ledger: new BudgetLedger({ calls: 50, tokens: 200000 }),
+      workspaceRoot: WORKSPACE_ROOT,
       ownerGeneration: 2,
     });
     expect(result.admitted).toBe(true);

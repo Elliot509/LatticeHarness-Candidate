@@ -8,7 +8,7 @@ import path from "node:path";
 // string is never authenticity. Bumps change revision, hash, license note
 // and tests together; there is no silent auto-update.
 //
-// Revisions verified during S4.1-A (see Regras/AGENT_INDEX_BOOTSTRAP.md):
+// Pinned upstream revisions verified during integration testing:
 //   agent-index-client @ 87901f8b (HEAD, contains join-on-409 + install-id)
 //   plow-agents        @ 8ce907e2 (HEAD, unchanged)
 //   agentsview         @ ed20f62f (base of the local Lattice provider patch;

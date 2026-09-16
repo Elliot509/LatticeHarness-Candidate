@@ -58,12 +58,12 @@ describe("storage upgrade", () => {
     buildV1Database(dataDir);
     const opened = openLatticeDb(dataDir);
     openHandles.push(opened);
-    expect(readSchemaVersion(opened.raw)).toBe(2);
+    expect(readSchemaVersion(opened.raw)).toBe(3);
     const contract = opened.raw.prepare("SELECT document FROM contracts WHERE task_id = 'task-old'").get() as { document: string };
     expect(JSON.parse(contract.document)).toMatchObject({ objective: "old work" });
     const run = opened.raw.prepare("SELECT session_id FROM runs WHERE task_id = 'task-old'").get() as { session_id: string };
     expect(run.session_id).toBe("session-old");
-    for (const table of ["waits", "wake_events", "pending_revisions"]) {
+    for (const table of ["waits", "wake_events", "pending_revisions", "composition_epochs"]) {
       const found = opened.raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { name: string } | undefined;
       expect(found?.name).toBe(table);
     }

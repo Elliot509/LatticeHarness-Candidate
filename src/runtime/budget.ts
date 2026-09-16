@@ -1,4 +1,10 @@
 export interface BudgetGrant {
+  // R1 semantics (D-R1-02): the cognitive budget. `calls` counts MODEL
+  // calls (model.invoke admissions); `tokens` counts MODEL tokens
+  // (input+output usage settled from provider reports). Tool dispatches
+  // never consume these dimensions: they reserve/settle 0/0 and remain
+  // identified, counted attempts in the ledger (see effects.ts), with their
+  // own optional durable execution-activity limit (maxToolDispatches).
   calls: number;
   tokens: number;
 }

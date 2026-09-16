@@ -244,6 +244,9 @@ function UsageRing({ reserved, granted }: { reserved: number; granted: number })
 export function Header({ api, state }: HeaderProps): JSX.Element {
   const task = state.task;
   const [configOpen, setConfigOpen] = useState(false);
+  // Initialized from the task route when the dialog opens (single source of
+  // truth: the route's provider/model). The useState default is only the
+  // pre-open placeholder; openConfig syncs it to the live route below.
   const [provider, setProvider] = useState("openai");
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -252,10 +255,21 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
   const modelButtonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const configWasOpenRef = useRef(false);
+  const taskRef = useRef(task);
+  taskRef.current = task;
 
   useEffect(() => {
     if (configOpen) {
       configWasOpenRef.current = true;
+      // Sync the dialog's provider/model fields to the live task route every
+      // time it opens (PR1-002): the route is the single source of truth, so
+      // a task created under openrouter never offers an openai-preselected
+      // key slot. User edits after opening are preserved (no sync while open).
+      const route = taskRef.current;
+      if (route !== null) {
+        setProvider(route.provider);
+        setModel(route.model);
+      }
       const first = panelRef.current?.querySelector("input, select");
       if (first instanceof HTMLElement) first.focus();
     } else if (configWasOpenRef.current) {
@@ -288,7 +302,10 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
   async function saveKey(): Promise<void> {
     if (key.trim() === "") return;
     try {
-      await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider: "openai", key } });
+      // Single source of truth: the task route's provider selects the key
+      // slot. The Header never invents its own provider universe (R1 F-0006:
+      // the hardcoded "openai" slot is gone); Settings stays configuration.
+      await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider, key } });
       setKey("");
       setNotice("Chave recebida pelo servidor local (só em memória, nunca exibida de novo).");
     } catch (error) {
@@ -367,7 +384,12 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
                 <label>
                   Provedor
                   <select value={provider} onChange={(event) => { setProvider(event.target.value); }} aria-label="Provedor">
-                    <option value="openai">openai-compatible</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="gemini">Google AI Studio</option>
+                    <option value="abacus">Abacus RouteLLM</option>
+                    <option value="local">Local</option>
+                    <option value="custom">Custom</option>
                   </select>
                 </label>
                 <label>
@@ -399,10 +421,22 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
   );
 }
 
-const NAV_ITEMS: Array<{ view: UiView; label: string; glyph: string }> = [
-  { view: "task", label: "Tarefas", glyph: "▤" },
-  { view: "settings", label: "Configurações", glyph: "⚙" },
-  { view: "help", label: "Ajuda", glyph: "?" },
+function UiIcon({ name }: { name: "task" | "settings" | "help" | "search" | "folder" | "terminal" }): JSX.Element {
+  const paths = {
+    task: "M4 4h16v12H8l-4 4V4Z M8 8h8 M8 12h5",
+    settings: "M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1 1-3Z M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0",
+    help: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 M9 9a3 3 0 1 1 5 2c-2 1-2 2-2 3 M12 17h.01",
+    search: "M16 16l5 5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0",
+    folder: "M3 6h7l2 2h9v12H3V6Z",
+    terminal: "m5 7 5 5-5 5 M13 17h6",
+  };
+  return <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>;
+}
+
+const NAV_ITEMS: Array<{ view: UiView; label: string; glyph: "task" | "settings" | "help" }> = [
+  { view: "task", label: "Tarefas", glyph: "task" },
+  { view: "settings", label: "Configurações", glyph: "settings" },
+  { view: "help", label: "Ajuda", glyph: "help" },
 ];
 
 export function Sidebar({ state, dispatch }: SidebarProps): JSX.Element {
@@ -431,7 +465,7 @@ export function Sidebar({ state, dispatch }: SidebarProps): JSX.Element {
         {!collapsed && (
           <span className="brandlabel" title="Lattice Agent">
             <span className="brandmark" aria-hidden="true" />
-            Lattice Agent
+            Lattice <span className="brandtag">AGENT</span>
           </span>
         )}
         {collapsed && <span className="brandmark" aria-hidden="true" title="Lattice Agent" />}
@@ -455,6 +489,7 @@ export function Sidebar({ state, dispatch }: SidebarProps): JSX.Element {
       {!collapsed && (
         <>
           <div className="sidebar-search">
+            <UiIcon name="search" />
             <input
               value={state.sessionFilter}
               onChange={(event) => { dispatch({ type: "session-filter", filter: event.target.value }); }}
@@ -503,7 +538,7 @@ export function Sidebar({ state, dispatch }: SidebarProps): JSX.Element {
                   aria-current={state.view === item.view}
                   onClick={() => { dispatch({ type: "set-view", view: item.view }); }}
                 >
-                  <span className="navglyph" aria-hidden="true">{item.glyph}</span>
+                  <span className="navglyph"><UiIcon name={item.glyph} /></span>
                   {item.label}
                 </button>
               ))}
@@ -524,7 +559,7 @@ export function Sidebar({ state, dispatch }: SidebarProps): JSX.Element {
                 title={item.label}
                 onClick={() => { dispatch({ type: "set-view", view: item.view }); }}
               >
-                <span className="navglyph" aria-hidden="true">{item.glyph}</span>
+                <span className="navglyph"><UiIcon name={item.glyph} /></span>
               </button>
             ))}
           </div>
@@ -601,13 +636,21 @@ function VerificationRow({ verification }: { verification: VerificationView }): 
 }
 
 function SteeringRow({ steering }: { steering: SteeringView }): JSX.Element {
+  // R1 honesty (F-0004): free-text steering — guide AND forbid — is guidance
+  // recorded durably and shown to the model, never mechanical enforcement.
+  // Only typed hard restrictions (a future core surface) enforce. The label
+  // says so explicitly so "applied" is never read as "blocked".
+  const modeLabel = steering.mode === "forbid" ? "Restrição registrada · orientação" : "Orientação";
   return (
     <div className="steering-row">
       <time className="eventtime" dateTime={steering.recordedAt}>{shortTime(steering.recordedAt)}</time>
       <span className="statusmark statusmark-steering" aria-hidden="true" />
       <div className="steering-main">
-        <span>Orientação · {steering.state}</span>
+        <span>{modeLabel} · {steering.state}</span>
         <p>{steering.text}</p>
+        {steering.mode === "forbid" && (
+          <p className="meta">Registrada como orientação forte; bloqueio mecânico exige restrição tipada (futura).</p>
+        )}
       </div>
       <span className="steering-revision">rev {steering.appliedRevision ?? steering.expectedRevision}</span>
     </div>
@@ -779,7 +822,7 @@ export function Detail({ api, state, dispatch }: DetailProps): JSX.Element | nul
     <aside className="detail" id="tool-detail" aria-label="Detalhe da tool">
       <div className="detail-head">
         <div>
-          <span className="detail-eyebrow">Inspetor de tool</span>
+          <span className="detail-eyebrow">Inspetor de execução</span>
           <strong className="detail-title">{tool.tool}</strong>
         </div>
         <button type="button" className="btn icon" aria-label="Fechar detalhe" onClick={() => { dispatch({ type: "select-detail", detailId: null }); }}>
@@ -995,15 +1038,18 @@ interface ModelPickerProps {
   model: string;
   baseUrl: string;
   hideProviderSelect?: boolean;
+  endpointOverride?: string;
   onPick: (pick: ModelPick) => void;
 }
 
-function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = false, onPick }: ModelPickerProps): JSX.Element {
+function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = false, endpointOverride, onPick }: ModelPickerProps): JSX.Element {
   const [presets, setPresets] = useState<ProviderPresetView[]>([]);
   const [keyMap, setKeyMap] = useState<Record<string, boolean>>({});
   const [currentProvider, setCurrentProvider] = useState(providerId);
   const [manual, setManual] = useState(model);
-  const [endpoint, setEndpoint] = useState(baseUrl);
+  const [endpointDraft, setEndpoint] = useState(baseUrl);
+  const endpoint = endpointOverride ?? endpointDraft;
+  const discoveryRequest = useRef(0);
   const [search, setSearch] = useState("");
   const [loadError, setLoadError] = useState("");
   const [discovery, setDiscovery] = useState<{ state: "idle" | "loading" | "ready" | "error"; models: DiscoveredModelView[]; kind: string; detail: string }>(
@@ -1030,16 +1076,25 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
 
   const preset = presets.find((entry) => entry.id === currentProvider) ?? null;
 
+  useEffect(() => {
+    discoveryRequest.current += 1;
+    setDiscovery({ state: "idle", models: [], kind: "", detail: "" });
+    return () => { discoveryRequest.current += 1; };
+  }, [endpoint, currentProvider]);
+
   async function discover(): Promise<void> {
+    const request = ++discoveryRequest.current;
     setDiscovery({ state: "loading", models: [], kind: "", detail: "" });
     try {
       const result: ModelsOutcome = await api.providerModels(currentProvider, endpoint.trim() !== "" ? endpoint.trim() : null);
+      if (request !== discoveryRequest.current) return;
       if (result.ok) {
         setDiscovery({ state: "ready", models: result.models, kind: "", detail: "" });
       } else {
         setDiscovery({ state: "error", models: [], kind: result.kind, detail: result.detail });
       }
     } catch (error) {
+      if (request !== discoveryRequest.current) return;
       setDiscovery({ state: "error", models: [], kind: "network", detail: error instanceof Error ? error.message : "falha de rede" });
     }
   }
@@ -1077,11 +1132,11 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
           </select>
         </label>
       )}
-      {preset !== null && <p className="meta">{preset.note}</p>}
-      {currentProvider === "custom" && preset === null && (
+      {!hideProviderSelect && preset !== null && <p className="meta">{preset.note}</p>}
+      {!hideProviderSelect && currentProvider === "custom" && preset === null && (
         <p className="meta">Endpoint arbitrário OpenAI-compatible. Listagem e tools dependem do servidor.</p>
       )}
-      <label>
+      {endpointOverride === undefined && <label>
         Endpoint (opcional)
         <input
           value={endpoint}
@@ -1089,13 +1144,13 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
           placeholder={preset?.defaultBaseUrl ?? "https://.../v1"}
           onChange={(event) => { setEndpoint(event.target.value); }}
         />
-      </label>
-      {preset?.keyRequired === true && keyMap[currentProvider] !== true && (
+      </label>}
+      {!hideProviderSelect && preset?.keyRequired === true && keyMap[currentProvider] !== true && (
         <p className="meta">Sem credencial configurada; a listagem pode recusar (401). Configure em Providers.</p>
       )}
       <div className="modelpicker-actions">
         <button type="button" className="btn" disabled={discovery.state === "loading"} onClick={() => { void discover(); }}>
-          {discovery.state === "loading" ? "Consultando…" : "Listar modelos"}
+          {discovery.state === "loading" ? "Consultando…" : discovery.state === "ready" ? "Atualizar modelos" : "Listar modelos"}
         </button>
       </div>
       {discovery.state === "error" && (
@@ -1292,8 +1347,10 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
 
   return (
     <section className="newtask" aria-labelledby="newtask-title">
-      <p className="newtask-eyebrow">Harness local de agentes</p>
-      <h1 id="newtask-title">Lattice Agent</h1>
+      <div className="newtask-emblem" aria-hidden="true"><span className="brandmark" /></div>
+      <p className="newtask-eyebrow">Lattice Agent · Harness local</p>
+      <h1 id="newtask-title">O que vamos construir?</h1>
+      <p className="newtask-subtitle">Uma tarefa, seu contexto. Do código à verificação.</p>
       <div className="newtask-controls" aria-label="Contexto da nova tarefa">
         <div className="newtask-modelwrap">
           <button
@@ -1306,7 +1363,7 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
             aria-haspopup="dialog"
             onClick={() => { setPanel((current) => (current === "workspace" ? null : "workspace")); }}
           >
-            <span className="context-key">Pasta</span>
+            <UiIcon name="folder" /><span className="context-key">Pasta</span>
             <span className="context-value">{workspaceLabel}</span>
             <span className="disclosure" aria-hidden="true">{panel === "workspace" ? "˄" : "˅"}</span>
           </button>
@@ -1420,7 +1477,7 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
           }}
         />
         <div className="newtask-composer-actions">
-          <span>Execução local</span>
+          <span><UiIcon name="terminal" />Execução local</span>
           <button
             type="submit"
             className="newtask-submit"
@@ -1473,124 +1530,129 @@ interface ProviderCardView {
   custom: boolean;
 }
 
-function ProviderCard({ api, card, keyOn, isDefault, defaultModel, onChanged, onUseAsDefault }: {
+function ProviderDetail({ api, card, keyOn, isDefault, defaults, onChanged }: {
   api: ApiClient;
   card: ProviderCardView;
   keyOn: boolean;
   isDefault: boolean;
-  defaultModel: string;
-  onChanged: () => void;
-  onUseAsDefault: (pick: ModelPick, scope: string) => void;
+  defaults: UiModelDefaults;
+  onChanged: () => Promise<void>;
 }): JSX.Element {
   const [key, setKey] = useState("");
+  const [endpoint, setEndpoint] = useState(isDefault ? defaults.baseUrl ?? card.defaultBaseUrl : card.defaultBaseUrl);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
   const [test, setTest] = useState<ConnectionOutcome | null>(null);
   const [testing, setTesting] = useState(false);
   const [showModels, setShowModels] = useState(false);
+  const testRequest = useRef(0);
 
-  async function saveKey(): Promise<void> {
-    if (key.trim() === "") return;
+  useEffect(() => () => { testRequest.current += 1; }, []);
+
+  async function changeKey(remove: boolean): Promise<void> {
     setBusy(true);
+    setError("");
+    setNotice("");
+    testRequest.current += 1;
+    setTest(null);
+    setTesting(false);
     try {
-      await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider: card.id, key } });
+      if (remove) {
+        await api.removeProviderKey(card.id);
+      } else {
+        const result = await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider: card.id, key } });
+        if (!result.accepted) throw new Error("O servidor não aceitou a credencial.");
+      }
       setKey("");
-      setNotice("Chave recebida pelo servidor (só em memória, nunca exibida de novo).");
-      onChanged();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "falha ao salvar a chave");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeKey(): Promise<void> {
-    setBusy(true);
-    try {
-      await api.removeProviderKey(card.id);
-      setNotice("Credencial removida desta sessão do servidor.");
-      onChanged();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "falha ao remover a chave");
+      setShowModels(false);
+      await onChanged();
+      setNotice(remove ? "Credencial removida desta sessão." : "Credencial salva em memória nesta sessão do servidor.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Não foi possível atualizar a credencial.");
     } finally {
       setBusy(false);
     }
   }
 
   async function runTest(): Promise<void> {
+    const request = ++testRequest.current;
     setTesting(true);
     setTest(null);
     try {
-      setTest(await api.testProvider(card.id, null));
-    } catch (error) {
-      setTest({ ok: false, providerId: card.id, baseUrl: card.defaultBaseUrl, kind: "network", modelCount: 0, detail: error instanceof Error ? error.message : "falha de rede" });
+      const result = await api.testProvider(card.id, endpoint.trim() || null);
+      if (request === testRequest.current) setTest(result);
+    } catch (err) {
+      if (request === testRequest.current) setTest({ ok: false, providerId: card.id, baseUrl: endpoint, kind: "network", modelCount: 0, detail: err instanceof Error ? err.message : "Falha de rede" });
     } finally {
-      setTesting(false);
+      if (request === testRequest.current) setTesting(false);
+    }
+  }
+
+  async function useModel(pick: ModelPick): Promise<void> {
+    setBusy(true);
+    setError("");
+    try {
+      const current = await api.productConfig();
+      if (current === null) throw new Error("Este servidor não permite salvar o provider padrão. Configure o modelo na tarefa.");
+      await api.saveProductConfig({ ...current, defaultProviderId: pick.providerId, defaultModel: pick.model, defaultBaseUrl: pick.baseUrl });
+      await onChanged();
+      setNotice(`Padrão das novas tarefas: ${pick.model}. A tarefa ativa mantém seu modelo.`);
+      setShowModels(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Não foi possível salvar o modelo.");
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div className="settings-card">
-      <h3>
-        {card.displayName}
-        {isDefault && <span className="card-tag">padrão das novas tarefas</span>}
-        {card.custom && <span className="card-tag">custom</span>}
-      </h3>
-      <p className="meta">{card.note}</p>
-      {card.docsUrl !== "" && (
-        <p className="meta"><a href={card.docsUrl} target="_blank" rel="noreferrer">Documentação oficial</a></p>
-      )}
-      <div className="keyrow">
-        <span className="meta">Credencial: {keyOn ? "configurada" : "não configurada"}</span>
-        {keyOn && (
-          <button type="button" className="btn" disabled={busy} onClick={() => { void removeKey(); }}>
-            Remover
-          </button>
-        )}
+    <section className="provider-detail" aria-label={`Configuração de ${card.displayName}`}>
+      <header className="provider-detail-head">
+        <div><h3>{card.displayName}</h3><p>{card.note}</p></div>
+        {card.docsUrl !== "" && <a href={card.docsUrl} target="_blank" rel="noreferrer">Documentação ↗</a>}
+      </header>
+      <details className="provider-field provider-credential" open={card.keyRequired || keyOn}>
+        <summary className="keyrow">
+          <h4>Credencial {card.keyRequired ? "" : <span>opcional</span>}</h4>
+          <span className={keyOn ? "credential-state configured" : "credential-state"}>{keyOn ? "Configurada · sessão" : "Não configurada"}</span>
+        </summary>
+        <label>
+          <span className="sr-only">{card.keyLabel}</span>
+          <input type="password" value={key} onChange={(event) => { setKey(event.target.value); }} autoComplete="off" aria-label={`Chave de API ${card.displayName}`} placeholder={keyOn ? "Nova chave para substituir a atual" : card.keyRequired ? "Cole sua chave de API" : "Informe somente se o servidor exigir"} />
+        </label>
+        <div className="provider-inline-actions">
+          <span className="meta">{card.custom ? "Credencial compartilhada pelos endpoints Custom nesta sessão." : "A chave fica apenas na memória do servidor."}</span>
+          <button type="button" className="btn" disabled={busy || key.trim() === ""} onClick={() => { void changeKey(false); }}>{keyOn ? "Substituir chave" : "Salvar chave"}</button>
+          {keyOn && <button type="button" className="btn" disabled={busy} onClick={() => { void changeKey(true); }}>Remover chave</button>}
+        </div>
+      </details>
+      <div className="provider-field">
+        <label>Endpoint
+          <input value={endpoint} aria-label="Endpoint do provider" placeholder={card.defaultBaseUrl} onChange={(event) => {
+            setEndpoint(event.target.value);
+            testRequest.current += 1;
+            setTest(null);
+            setTesting(false);
+          }} />
+        </label>
+        <div className="provider-inline-actions">
+          <span className="meta">{card.id === "local" ? "Servidor local já em execução. Pesos e modelos são gerenciados fora do Lattice." : card.custom ? "Serviço OpenAI-compatible. Compatibilidade depende do endpoint." : "Usado no teste e na descoberta de modelos."}</span>
+          <button type="button" className="btn" disabled={testing || busy || endpoint.trim() === ""} onClick={() => { void runTest(); }}>{testing ? "Testando…" : "Testar conexão"}</button>
+        </div>
+        {test !== null && <p className={test.ok ? "provider-feedback success" : "provider-feedback error"} role="status">{connectionText(test)}</p>}
       </div>
-      <label>
-        {card.keyLabel}
-        <input
-          type="password"
-          value={key}
-          onChange={(event) => { setKey(event.target.value); }}
-          autoComplete="off"
-          aria-label={`Chave de API ${card.displayName}`}
-          placeholder={keyOn ? "Nova chave (substitui a anterior)" : "Colar a chave"}
-        />
-      </label>
-      <div className="settings-actions">
-        <button type="button" className="btn" disabled={busy || key.trim() === ""} onClick={() => { void saveKey(); }}>
-          Salvar em memória
-        </button>
-        <button type="button" className="btn" disabled={testing} onClick={() => { void runTest(); }}>
-          {testing ? "Testando…" : "Testar conexão"}
-        </button>
-        <button type="button" className="btn" onClick={() => { setShowModels((open) => !open); }} aria-expanded={showModels}>
-          {showModels ? "Fechar modelos" : "Escolher modelo"}
-        </button>
+      <div className="provider-field">
+        <div className="provider-model-head">
+          <div><h4>Modelo para novas tarefas</h4><p className="meta">{isDefault && defaults.model !== "" ? defaults.model : "Nenhum modelo padrão neste provider"}</p></div>
+          <button type="button" className="btn" disabled={busy} aria-expanded={showModels} onClick={() => { setShowModels((open) => !open); }}>{showModels ? "Fechar modelos" : "Escolher modelo"}</button>
+        </div>
+        {showModels && <ModelPicker api={api} providerId={card.id} model={isDefault ? defaults.model : ""} baseUrl={endpoint} endpointOverride={endpoint} hideProviderSelect onPick={(pick) => { if (!busy) void useModel(pick); }} />}
+        <p className="provider-save-hint">Escolher um modelo salva o provider e o endpoint como padrão. Testar conexão não salva alterações.</p>
       </div>
-      {test !== null && (
-        <p className={test.ok ? "meta" : "meta error"} role="status">Conexão: {connectionText(test)}</p>
-      )}
-      {showModels && (
-        <ModelPicker
-          api={api}
-          providerId={card.id}
-          model={isDefault ? defaultModel : ""}
-          baseUrl=""
-          hideProviderSelect
-          onPick={(pick) => {
-            void (async () => {
-              const scope = await saveUiDefaults(api, { providerId: pick.providerId, model: pick.model, baseUrl: pick.baseUrl });
-              onUseAsDefault(pick, scope === "server" ? "neste servidor" : "neste navegador");
-              onChanged();
-            })();
-          }}
-        />
-      )}
-      {notice !== "" && <p className="notice" role="status">{notice}</p>}
-    </div>
+      {notice !== "" && <p className="provider-feedback" role="status">{notice}</p>}
+      {error !== "" && <p className="provider-feedback error" role="alert">{error}</p>}
+    </section>
   );
 }
 
@@ -1600,6 +1662,9 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
   const [defaults, setDefaults] = useState<UiModelDefaults>({ providerId: "openai", model: "", baseUrl: null });
   const [configSource, setConfigSource] = useState<"server" | "browser">("browser");
   const [customs, setCustoms] = useState<ProductConfigView["customProviders"]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [savingCustom, setSavingCustom] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customBase, setCustomBase] = useState("");
   const [customKey, setCustomKey] = useState(false);
@@ -1607,6 +1672,7 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
   const [notice, setNotice] = useState("");
 
   const refresh = async (): Promise<void> => {
+    setError("");
     try {
       const [list, status, config] = await Promise.all([
         api.providers(),
@@ -1629,6 +1695,8 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "não foi possível carregar os providers");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -1649,17 +1717,22 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
         setError("Este servidor não persiste configuração; custom ficaria só nesta tela.");
         return;
       }
+      setSavingCustom(true);
       const next = await api.saveProductConfig({
         ...current,
         customProviders: [...current.customProviders, { displayName: customName.trim(), baseUrl: customBase.trim(), keyRequired: customKey }],
       });
       setCustoms(next.customProviders);
+      const saved = next.customProviders.at(-1);
+      if (saved !== undefined) setSelectedProvider(`custom:${saved.displayName}:${saved.baseUrl}`);
       setCustomName("");
       setCustomBase("");
       setCustomKey(false);
       setNotice("Provider custom salvo neste servidor.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "não foi possível salvar o custom");
+    } finally {
+      setSavingCustom(false);
     }
   }
 
@@ -1677,7 +1750,7 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
     ...customs.map((custom) => ({
       id: "custom" as const,
       displayName: custom.displayName,
-      note: `Endpoint OpenAI-compatible arbitrário (${custom.baseUrl}). Listagem e tools dependem do servidor.`,
+      note: "Endpoint OpenAI-compatible personalizado. Listagem e tools dependem do servidor.",
       docsUrl: "",
       keyRequired: custom.keyRequired,
       keyLabel: "Chave de API",
@@ -1686,36 +1759,43 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
     })),
   ];
 
+  const cardKey = (card: ProviderCardView): string => card.custom ? `custom:${card.displayName}:${card.defaultBaseUrl}` : card.id;
+  const isDefault = (card: ProviderCardView): boolean => defaults.providerId === card.id && (!card.custom || defaults.baseUrl === card.defaultBaseUrl);
+  const selected = selectedProvider === "add-custom" ? null
+    : cards.find((card) => cardKey(card) === selectedProvider) ?? cards.find(isDefault) ?? cards[0] ?? null;
+
   return (
-    <>
+    <div className="providers-section">
       <h2>Providers</h2>
-      <p className="settings-lead">
-        Padrão atual: {defaults.providerId}{defaults.model !== "" ? `/${defaults.model}` : ""} ({configSource === "server" ? "neste servidor" : "neste navegador"}).
-        Todos falam o protocolo OpenAI-compatible; o preset só escolhe configuração, nunca protocolo. Sem routing automático.
-      </p>
-      {error !== "" && <p className="meta error" role="alert">{error}</p>}
-      {notice !== "" && <p className="notice" role="status">{notice}</p>}
-      {cards.map((card) => (
-        <ProviderCard
-          key={`${card.custom ? "custom-" : ""}${card.displayName}`}
-          api={api}
-          card={card}
-          keyOn={statusMap[card.id] === true}
-          isDefault={!card.custom && defaults.providerId === card.id}
-          defaultModel={!card.custom && defaults.providerId === card.id ? defaults.model : ""}
-          onChanged={() => {
-            void refresh();
-            onDefaults();
-          }}
-          onUseAsDefault={(pick, scope) => {
-            setDefaults({ providerId: pick.providerId, model: pick.model, baseUrl: pick.baseUrl });
-            setNotice(`Padrão das novas tarefas: ${pick.providerId}/${pick.model} (${scope}).`);
-            onDefaults();
-          }}
-        />
-      ))}
-      <div className="settings-card">
-        <h3>Adicionar custom</h3>
+      <p className="settings-lead">Configure os serviços usados pelo Lattice.</p>
+      <p className="provider-default">Padrão atual: <strong>{defaults.providerId}{defaults.model !== "" ? ` / ${defaults.model}` : ""}</strong> · {configSource === "server" ? "neste servidor" : "neste navegador"}</p>
+      {error !== "" && <p className="provider-feedback error" role="alert">{error} <button type="button" className="btn" onClick={() => { void refresh(); }}>Tentar novamente</button></p>}
+      {loading && <p role="status" className="meta">Carregando providers…</p>}
+      {!loading && cards.length === 0 && error === "" && <p className="meta">Nenhum provider retornado pelo servidor.</p>}
+      <div className="providers-layout">
+        <nav className="provider-master" aria-label="Providers" onKeyDown={(event) => {
+          if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+          const buttons = Array.from(event.currentTarget.querySelectorAll("button"));
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          if (index < 0) return;
+          event.preventDefault();
+          const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+          buttons[next]?.focus();
+        }}>
+          {cards.map((card) => (
+            <button type="button" key={cardKey(card)} className={selected === card ? "provider-option selected" : "provider-option"} aria-current={selected === card} onClick={() => { setSelectedProvider(cardKey(card)); setNotice(""); }}>
+              <span className="provider-option-name">{card.displayName}{isDefault(card) && <span className="provider-default-mark" title="Provider padrão" aria-label="Provider padrão">●</span>}</span>
+              <span className="provider-option-state">{statusMap[card.id] === true ? "Configurado · sessão" : card.keyRequired ? "Não configurado" : "Chave opcional"}</span>
+            </button>
+          ))}
+          <button type="button" className={selectedProvider === "add-custom" ? "provider-option selected" : "provider-option"} aria-current={selectedProvider === "add-custom"} onClick={() => { setSelectedProvider("add-custom"); setNotice(""); }}>
+            <span className="provider-option-name">+ Custom</span><span className="provider-option-state">Adicionar endpoint</span>
+          </button>
+        </nav>
+        <div className="provider-detail-slot">
+          {selected !== null && <ProviderDetail key={cardKey(selected)} api={api} card={selected} keyOn={statusMap[selected.id] === true} isDefault={isDefault(selected)} defaults={defaults} onChanged={async () => { setNotice(""); await refresh(); onDefaults(); }} />}
+          {selectedProvider === "add-custom" && <div className="provider-detail provider-custom-form">
+        <header className="provider-detail-head"><div><h3>Custom OpenAI-compatible</h3><p>Adicione um serviço pelo nome e endpoint. Depois, configure o modelo e a credencial se necessária.</p></div></header>
         <label>
           Nome de exibição
           <input value={customName} aria-label="Nome do custom" onChange={(event) => { setCustomName(event.target.value); }} placeholder="ACME gateway" />
@@ -1729,12 +1809,15 @@ function ProvidersSection({ api, onDefaults }: { api: ApiClient; onDefaults: () 
           <span>Exige chave de API</span>
         </label>
         <div className="settings-actions">
-          <button type="button" className="btn primary" onClick={() => { void saveCustom(); }}>
-            Salvar custom
+          <button type="button" className="btn primary" disabled={savingCustom} onClick={() => { void saveCustom(); }}>
+            {savingCustom ? "Salvando…" : "Salvar custom"}
           </button>
         </div>
+          </div>}
+          {notice !== "" && <p className="provider-feedback" role="status">{notice}</p>}
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -1771,7 +1854,7 @@ export function SettingsView({ api, state, dispatch }: SettingsProps): JSX.Eleme
         </div>
         <button type="button" className="btn" onClick={backToTask}>Voltar à tarefa</button>
       </div>
-      <div className="settings-body">
+      <div className={category === "providers" ? "settings-body settings-providers" : "settings-body"}>
         <nav className="settings-nav" aria-label="Categorias de configuração">
           {(["geral", "providers"] as const).map((entry) => (
             <button
@@ -1789,7 +1872,7 @@ export function SettingsView({ api, state, dispatch }: SettingsProps): JSX.Eleme
           {category === "geral" && (
             <>
               <h2>Geral</h2>
-              <p className="settings-lead">Ambiente local e comportamento da interface. Nada aqui sai desta máquina.</p>
+              <p className="settings-lead">Pasta de trabalho, conexão e preferências da interface.</p>
               <div className="settings-card">
                 <h3>Pasta de trabalho</h3>
                 <p className="settings-path" title={workspace}>{workspace === "" ? "Abrindo pasta de trabalho" : workspace}</p>
@@ -1854,6 +1937,49 @@ const HELP_STATES: Array<{ state: "READY" | "RUNNING" | "WAITING" | "NEEDS_INPUT
   { state: "CANCELLED", meaning: "Interrompida; o que já ocorreu continua visível." },
 ];
 
+// Editorial reference to docs/future/INTERACTION_EXTENSIBILITY_SURFACE.md §§5–6.
+// These entries are documentation only, never executable command descriptors.
+const PLANNED_COMMAND_GROUPS = [
+  { title: "Operação da tarefa", commands: [
+    ["/status", "Consultar estado e execução sem chamar o modelo."],
+    ["/model", "Abrir o seletor da tarefa; aplicar em ponto seguro."],
+    ["/diff", "Inspecionar alterações e sua revisão."],
+    ["/stop", "Solicitar interrupção e observar os efeitos."],
+    ["/resume", "Solicitar retomada sob a concessão original."],
+    ["/help", "Consultar o catálogo local de comandos."],
+  ] },
+  { title: "Planejamento e evidência", commands: [
+    ["/plan", "Planejar com restrição de mutações."],
+    ["/review", "Solicitar revisão; não implica commit ou push."],
+    ["/debug", "Investigar um problema a partir da evidência."],
+    ["/research", "Pesquisar dentro do escopo e orçamento autorizados."],
+    ["/verify", "Solicitar verificação dos critérios da tarefa."],
+    ["/test", "Executar testes com alvo e pasta definidos."],
+  ] },
+  { title: "Contexto e continuidade", commands: [
+    ["/context", "Inspecionar referências, custos e conteúdo omitido."],
+    ["/budget", "Consultar orçamento ou solicitar extensão explícita."],
+    ["/provider", "Inspecionar ou configurar a rota; sem chaves no comando."],
+    ["/checkpoint", "Registrar um ponto de continuidade derivado do histórico."],
+    ["/wait", "Definir condição e limite de espera."],
+    ["/reconcile", "Solicitar observação de um efeito incerto."],
+    ["/retry", "Propor repetição apenas após avaliar a segurança."],
+    ["/compact", "Propor compactação preservando referências essenciais."],
+    ["/fork", "Propor uma nova tarefa; adoção adiada."],
+  ] },
+  { title: "Extensões e referências @", commands: [
+    ["/skill use \"local/security-review\" --version \"1.2.0\"", "Selecionar um procedimento versionado, sem executá-lo automaticamente."],
+    ["/profile", "Selecionar defaults e requisitos de um perfil."],
+    ["/tools", "Consultar capacidades e motivos de indisponibilidade."],
+    ["/mcp", "Gerenciar conexões sob autorização própria."],
+    ["/plugin disable", "Solicitar desativação de uma extensão."],
+    ["/browser inspect \"tab-7\"", "Inspecionar uma sessão de navegador."],
+    ["/memory inspect \"claim-42\"", "Inspecionar uma memória identificada."],
+    ["/agent", "Alias candidato para perfil; nome adiado, sem subagentes implícitos."],
+    ["@skills/security-review.md", "Exemplo de referência tipada futura. Arquivos, pastas, evidências, sessões e perfis também são candidatos."],
+  ] },
+];
+
 export function HelpView({ state, dispatch }: { state: UiState; dispatch: Dispatch }): JSX.Element {
   function backToTask(): void {
     if (state.activeTaskId !== null) dispatch({ type: "open-task", taskId: state.activeTaskId });
@@ -1871,12 +1997,39 @@ export function HelpView({ state, dispatch }: { state: UiState; dispatch: Dispat
       </div>
       <div className="settings-body">
         <div className="settings-content help-content">
+          <section className="help-commands" aria-labelledby="commands-title">
+            <h2 id="commands-title">Comandos</h2>
+            <p className="settings-lead">O que você pode fazer hoje e a linguagem prevista para o Lattice.</p>
+            <div className="help-section-heading"><h3>Disponível</h3><span className="availability available">Na interface</span></div>
+            <dl className="available-actions">
+              <div><dt>Tarefa e sessão</dt><dd>Nova tarefa, busca e histórico na barra lateral.</dd></div>
+              <div><dt>Modelo e provider</dt><dd>Seletor no cabeçalho da tarefa. Mudanças aguardam confirmação em ponto seguro.</dd></div>
+              <div><dt>Orientar · interromper · retomar</dt><dd>Composer e botões da tarefa, conforme o estado permite. Recebido não significa aplicado.</dd></div>
+              <div><dt>Diff, testes e evidência</dt><dd>Abra uma linha de ferramenta no inspetor. Testes mostram os resultados e contagens conhecidos.</dd></div>
+            </dl>
+            <div className="help-section-heading"><h3>Planejado</h3><span className="availability planned">Ainda não executável</span></div>
+            <p className="commands-caveat">Slash e referências @ ainda não são interpretados. Hoje, digitá-los no composer envia texto comum ao agente.</p>
+            <div className="planned-commands">
+              {PLANNED_COMMAND_GROUPS.map((group, index) => (
+                <details className="command-group" key={group.title} open={index === 0}>
+                  <summary>{group.title}<span>{group.commands.length} entradas · planejadas</span></summary>
+                  <dl className="command-entries">
+                    {group.commands.map(([syntax, description]) => <div key={syntax}><dt><code>{syntax}</code></dt><dd>{description}</dd></div>)}
+                  </dl>
+                </details>
+              ))}
+            </div>
+            <p className="help-source">Referência: estudo de extensibilidade, §§5–6. /help, /status, /stop, /model, /diff e /test são formas curtas candidatas. Parser, catálogo compartilhado e paleta continuam planejados.</p>
+          </section>
+          <details className="help-guide">
+          <summary>Atalhos, estados e uso da interface</summary>
           <h2>Atalhos de teclado</h2>
           <dl className="help-keys">
             <dt>Enter</dt><dd>Envia a mensagem do composer, salvo preferência em contrário (Configurações › Geral).</dd>
             <dt>Shift+Enter</dt><dd>Quebra linha sem enviar.</dd>
-            <dt>Escape</dt><dd>Fecha diálogos sem aprovar nem apagar rascunho.</dd>
-            <dt>Tab</dt><dd>Navega entre controles numa ordem previsível.</dd>
+            <dt>Ctrl / Cmd+Enter</dt><dd>Envia independentemente da preferência de Enter; composição IME não envia.</dd>
+            <dt>Escape</dt><dd>Fecha seletores de modelo e pasta. Não equivale a interromper a tarefa.</dd>
+            <dt>Tab</dt><dd>Navega entre controles. Na lista de providers, setas movem o foco e Enter seleciona.</dd>
           </dl>
           <h2>O que a interface faz</h2>
           <ul className="help-list">
@@ -1896,7 +2049,17 @@ export function HelpView({ state, dispatch }: { state: UiState; dispatch: Dispat
             ))}
           </ul>
           <h2>Limites honestos</h2>
-          <p className="meta">Estado “Resultado incerto” nunca é sucesso: indica efeito não observado, com próximo passo do core. O que o backend não oferece não aparece como controle — sem anexos, sem comandos slash, sem catálogo de modelos.</p>
+          <p className="meta">Estado “Resultado incerto” não é sucesso: o efeito não foi observado. Retomada pode ser recusada por concessão, orçamento ou estado. A descoberta de modelos depende do provider; ID manual permanece disponível.</p>
+          </details>
+          <details className="help-guide help-cli">
+            <summary>Comandos disponíveis no terminal <span>CLI · fora do chat</span></summary>
+            <dl className="command-entries">
+              <div><dt><code>lattice status</code></dt><dd>Inspeciona configuração e prontidão local; não é /status da tarefa.</dd></div>
+              <div><dt><code>lattice sessions</code></dt><dd>Lista sessões persistidas.</dd></div>
+              <div><dt><code>lattice resume &lt;taskId&gt;</code></dt><dd>Solicita retomada sob os limites originais; não inicia o loop sozinho.</dd></div>
+              <div><dt><code>lattice run --resume &lt;taskId&gt;</code></dt><dd>Retoma e executa uma tarefa persistida quando permitido.</dd></div>
+            </dl>
+          </details>
         </div>
       </div>
     </section>

@@ -67,6 +67,12 @@ export interface LoopOptions {
   grantedCalls: number;
   grantedTokens: number;
   maxIterations?: number;
+  // Optional durable execution-activity limit (R1 D-R1-02): caps the number
+  // of tool dispatches for this activation. Unset means unbounded by this
+  // mechanism (maxIterations and the LoopGovernor still bound the loop).
+  // This is deliberately NOT a product default: no evidence-backed value
+  // exists yet, and inventing one would be policy without data.
+  maxToolDispatches?: number | undefined;
   contextChars?: number;
   signal?: AbortSignal;
   acceptanceVerifiers?: Array<() => AcceptanceCheck>;
@@ -180,6 +186,7 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
       { calls: options.grantedCalls, tokens: options.grantedTokens },
       options.ownerGeneration,
       admittedAt,
+      options.toolContext.workspaceRoot,
     );
     if (!modelAttempt.admitted) {
       return stop(
@@ -193,7 +200,10 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
         options,
       );
     }
-    const claim = claimDurable(options.db, modelAttempt.attemptId, options.ownerGeneration, options.contract.revision);
+    const claim = claimDurable(options.db, modelAttempt.attemptId, options.ownerGeneration, options.contract.revision, {
+      contract: options.contract,
+      now: new Date(),
+    });
     if (!claim.claimed) {
       recordReceiptDurable(options.db, {
         attemptId: modelAttempt.attemptId,
@@ -310,6 +320,17 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
       }
       seenActions.push(fingerprint);
 
+      // Optional execution-activity cap (R1 D-R1-02): counts dispatches, not
+      // model calls. Unset = unbounded by this mechanism. The check runs
+      // BEFORE admission so a capped tool never reserves, claims, or
+      // dispatches; the denial is evidence, not a silent drop.
+      if (options.maxToolDispatches !== undefined && toolDispatches >= options.maxToolDispatches) {
+        evidence.push({
+          id: `ev-${evidence.length + 1}`,
+          text: `Tool ${call.name} denied: tool dispatch limit reached (${toolDispatches}/${options.maxToolDispatches}); no dispatch, no claim.`,
+        });
+        continue;
+      }
       const admission = admitDurable(
         options.db,
         options.contract,
@@ -325,6 +346,8 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
         },
         { calls: options.grantedCalls, tokens: options.grantedTokens },
         options.ownerGeneration,
+        new Date(),
+        options.toolContext.workspaceRoot,
       );
       if (!admission.admitted) {
         if (admission.reason === "budget-exceeded") {
@@ -333,7 +356,10 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
         evidence.push({ id: `ev-${evidence.length + 1}`, text: `Tool ${call.name} denied: ${admission.detail}` });
         continue;
       }
-      const toolClaim = claimDurable(options.db, admission.attemptId, options.ownerGeneration, options.contract.revision);
+      const toolClaim = claimDurable(options.db, admission.attemptId, options.ownerGeneration, options.contract.revision, {
+        contract: options.contract,
+        now: new Date(),
+      });
       if (!toolClaim.claimed) {
         recordReceiptDurable(options.db, {
           attemptId: admission.attemptId,
@@ -602,7 +628,12 @@ function settleModelUsage(
 function callTarget(argsJson: string): string | null {
   const parsed = parseToolArgs(argsJson);
   if (!parsed.ok) return null;
-  const value = parsed.value["path"] ?? parsed.value["target"] ?? parsed.value["query"] ?? parsed.value["executable"];
+  // Authority target: the workspace-relative PATH the operation acts on.
+  // Search queries are content, not paths: they must never enter the target
+  // gate (a query like "/etc/passwd" would otherwise deny/fail spuriously),
+  // so search intents carry a null target and rely on operation authority
+  // plus root containment at the tool boundary.
+  const value = parsed.value["path"] ?? parsed.value["target"] ?? parsed.value["executable"];
   return typeof value === "string" ? value : null;
 }
 

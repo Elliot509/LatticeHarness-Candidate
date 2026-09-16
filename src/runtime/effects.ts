@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import {
   admitIntent,
   claimTicket,
@@ -26,7 +27,14 @@ export interface DurableIntentInput {
 
 export type DurableDenialReason =
   | "no-grant"
+  | "operation-not-granted"
   | "contract-expired"
+  | "grant-expired"
+  | "target-not-granted"
+  | "provider-not-granted"
+  | "model-not-granted"
+  | "realm-not-granted"
+  | "restriction-denied"
   | "stale-revision"
   | "stale-generation"
   | "budget-exceeded"
@@ -49,7 +57,24 @@ export type DurableAdmission = DurableAdmitted | DurableDenied;
 
 export type DurableClaimResult =
   | { claimed: true }
-  | { claimed: false; reason: "already-claimed" | "stale-generation" | "stale-revision" | "not-found" | "invalidated" };
+  | {
+      claimed: false;
+      reason:
+        | "already-claimed"
+        | "stale-generation"
+        | "stale-revision"
+        | "not-found"
+        | "invalidated"
+        | "contract-expired"
+        | "grant-expired"
+        | "grant-changed"
+        | "target-not-granted"
+        | "provider-not-granted"
+        | "model-not-granted"
+        | "realm-not-granted"
+        | "restriction-denied"
+        | "operation-not-granted";
+    };
 
 export class DuplicateReceiptError extends Error {
   readonly attemptId: string;
@@ -137,6 +162,7 @@ export function admitDurable(
   granted: { calls: number; tokens: number },
   ownerGeneration: number,
   now: Date = new Date(),
+  workspaceRootHint?: string,
 ): DurableAdmission {
   const actionIntent: ActionIntent = {
     intentId: `intent-${randomUUID()}`,
@@ -173,6 +199,16 @@ export function admitDurable(
     contract,
     ledger: ledgerWithPersistedTotals(granted, settled, reserved),
     ownerGeneration,
+    // Target matching resolves against the task workspace. Durable intents
+    // carry workspace-relative targets (server/CLI scope) so the authority
+    // gate and the tool containment share one root; exec/process targets are
+    // free-form and stay out of the target gate by design (see authority.ts).
+    // Prefer the run manifest workspace, but only when it CONTAINS the
+    // contract scope: otherwise the manifest is stale/foreign and the scope
+    // (the authority the user actually granted) decides. Callers may pass an
+    // explicit workspaceRoot (the loop passes its toolContext root, which is
+    // the ground truth at dispatch time).
+    workspaceRoot: workspaceRootFor(db, contract, input.taskId, workspaceRootHint),
     now,
   });
   if (!check.admitted) {
@@ -225,6 +261,44 @@ export function admitDurable(
 
 // Reuses the S0 validation (grant, expiry, revision, generation) against
 // totals already persisted, so restarts never renew the budget.
+function workspaceRootFor(db: DatabaseSync, contract: TaskContract, taskId: string, hint?: string): string {
+  // Explicit caller hint wins when it contains the granted scope (the loop
+  // passes its toolContext root: ground truth at dispatch time). The
+  // containment check runs lexically on purpose: at this point the hint may
+  // be a fresh temp dir whose scope child does not exist on disk yet, and
+  // resolveInScope would refuse it for absence rather than escape.
+  if (hint !== undefined && hint !== "") {
+    const scope = contract.scope[0];
+    if (typeof scope !== "string" || scope === "") return hint;
+    if (path.isAbsolute(scope)) {
+      const relative = path.relative(path.resolve(hint), path.resolve(scope));
+      if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return hint;
+      return scope;
+    }
+    return hint;
+  }
+  // Prefer the task workspace recorded in the run manifest (absolute,
+  // server-resolved); fall back to the first contract scope entry when it is
+  // itself absolute, then to the process cwd. Target matching then degrades
+  // gracefully, never to silent allow (absolute targets always deny). A
+  // RELATIVE scope entry is NOT resolved against the cwd: it would make the
+  // gate depend on where the process happened to start.
+  try {
+    const row = db
+      .prepare("SELECT manifest FROM runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(taskId) as { manifest: string } | undefined;
+    if (row !== undefined) {
+      const manifest = JSON.parse(row.manifest) as { workspace?: unknown };
+      if (typeof manifest.workspace === "string" && manifest.workspace !== "") return manifest.workspace;
+    }
+  } catch {
+    // Fall through to scope/cwd fallbacks below.
+  }
+  const scope = contract.scope[0];
+  if (typeof scope === "string" && scope !== "" && path.isAbsolute(scope)) return scope;
+  return process.cwd();
+}
+
 function ledgerWithPersistedTotals(
   granted: { calls: number; tokens: number },
   settled: ReservationTotals,
@@ -243,17 +317,25 @@ function ledgerWithPersistedTotals(
 }
 
 // Durable claim: revalidates generation and contract revision against the
-// persisted ticket immediately before invocation, single-use. Commit durável;
-// the executor may invoke at most once after this commit.
+// persisted ticket immediately before invocation, single-use, PLUS the full
+// CURRENT authority (expiry, grant, target, provider/model/realm, typed
+// restrictions) inside the same transactional boundary. A grant that expired
+// between ADMITTED and CLAIMED (crash, WAIT, slow queue) denies here: admit
+// and claim are never assumed to be fast. Commit durável; the executor may
+// invoke at most once after this commit.
 export function claimDurable(
   db: DatabaseSync,
   attemptId: string,
   ownerGeneration: number,
   contractRevision: number,
+  revalidation?: {
+    contract: TaskContract;
+    now?: Date | undefined;
+  },
 ): DurableClaimResult {
   const row = db
-    .prepare("SELECT ticket, state FROM attempts WHERE attempt_id = ?")
-    .get(attemptId) as { ticket: string; state: string } | undefined;
+    .prepare("SELECT ticket, state, intent_id FROM attempts WHERE attempt_id = ?")
+    .get(attemptId) as { ticket: string; state: string; intent_id: string } | undefined;
   if (row === undefined) return { claimed: false, reason: "not-found" };
   // Only a live admission ticket is claimable: resolved, unknown,
   // reconciled and invalidated attempts never gain authority again, even if
@@ -261,9 +343,29 @@ export function claimDurable(
   if (row.state === "INVALIDATED") return { claimed: false, reason: "invalidated" };
   if (row.state !== "ADMITTED") return { claimed: false, reason: "already-claimed" };
   const ticket = JSON.parse(row.ticket) as AdmissionTicket;
-  const result = claimTicket(ticket, ownerGeneration, contractRevision);
-  if (!result.claimed) {
-    return { claimed: false, reason: result.reason ?? "already-claimed" };
+  const intent = db
+    .prepare("SELECT operation, target FROM intents WHERE intent_id = ?")
+    .get(row.intent_id) as { operation: string; target: string | null } | undefined;
+  if (intent === undefined) return { claimed: false, reason: "not-found" };
+  // WITHOUT an explicit contract the claim still revalidates generation and
+  // revision against the persisted ticket (legacy path); WITH a contract it
+  // re-runs the full authority evaluator on CURRENT state before consuming.
+  if (revalidation === undefined) {
+    const result = claimTicket(ticket, ownerGeneration, contractRevision);
+    if (!result.claimed) {
+      return { claimed: false, reason: result.reason ?? "already-claimed" };
+    }
+  } else {
+    const result = claimTicket(ticket, ownerGeneration, contractRevision, {
+      contract: revalidation.contract,
+      operation: intent.operation,
+      target: intent.target,
+      workspaceRoot: workspaceRootFor(db, revalidation.contract, row.intent_id),
+      now: revalidation.now,
+    });
+    if (!result.claimed) {
+      return { claimed: false, reason: result.reason ?? "already-claimed" };
+    }
   }
   guardWrites("claimDurable");
   throwIfFault("before-claim-commit");

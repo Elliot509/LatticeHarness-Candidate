@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { buildChildEnv } from "../platform/childEnv.js";
 import type { ToolDefinition } from "../providers/types.js";
 import { resolveInScope } from "../platform/paths.js";
 import { toolFailure, type ToolResult } from "./types.js";
@@ -122,10 +123,15 @@ export class ProcessSupervisor {
   private readonly processes = new Map<string, Supervised>();
   private readonly maxBytes: number;
   private readonly workspaceRoot: string;
+  // Explicit overlay authorized for children of this supervisor (same role
+  // as the per-call args env, but bound at construction by the runtime).
+  // Absent means no overlay: children get the allowlist base only.
+  private readonly envOverlay: Record<string, string> | undefined;
 
-  constructor(workspaceRoot: string, maxBytes = DEFAULT_MAX_BYTES) {
+  constructor(workspaceRoot: string, maxBytes = DEFAULT_MAX_BYTES, envOverlay?: Record<string, string>) {
     this.workspaceRoot = workspaceRoot;
     this.maxBytes = maxBytes;
+    this.envOverlay = envOverlay !== undefined && Object.keys(envOverlay).length > 0 ? { ...envOverlay } : undefined;
   }
 
   async execute(rawArgs: ProcessOperation): Promise<ToolResult> {
@@ -156,9 +162,11 @@ export class ProcessSupervisor {
     }
     let child: ChildProcess;
     try {
+      // No ambient inheritance: allowlist base + supervisor overlay +
+      // per-spawn args (explicit only). Runtime secrets never leak here.
       child = spawn(args.executable, args.argv ?? [], {
         cwd,
-        env: { ...process.env, ...(args.env ?? {}) },
+        env: buildChildEnv({ ...(this.envOverlay ?? {}), ...(args.env ?? {}) }),
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
         windowsHide: true,

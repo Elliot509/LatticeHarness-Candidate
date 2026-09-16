@@ -275,7 +275,7 @@ try {
     env: { ...process.env, LATTICE_DATA_DIR: upgradeData },
   });
   const upgradeReport = JSON.parse(upgradeOut);
-  if (upgradeReport.schemaVersion !== 2) fail(`upgrade did not migrate to schema 2: ${upgradeOut.slice(0, 200)}`);
+  if (upgradeReport.schemaVersion !== 3) fail(`upgrade did not migrate to schema 3: ${upgradeOut.slice(0, 200)}`);
   {
     const reopened = new DatabaseSync(upgradeDbPath);
     try {
@@ -283,6 +283,8 @@ try {
       if (!kept || !kept.document.includes("pre-upgrade work")) fail("upgrade lost the previous contract row");
       const waits = reopened.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'waits'").get();
       if (!waits) fail("upgrade did not create the v2 waits table");
+      const epochs = reopened.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'composition_epochs'").get();
+      if (!epochs) fail("upgrade did not create the v3 composition_epochs table");
     } finally {
       reopened.close();
     }

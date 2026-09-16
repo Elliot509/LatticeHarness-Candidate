@@ -38,7 +38,7 @@ function printHelp(): void {
     "  lattice sessions [--json]",
     "  lattice resume <taskId> [--json]",
     "  lattice export --session <id> --out <path>",
-    "  lattice wake --task <id> --source <s> --cursor <c> --observation <text> [--wait <id>] [--level]",
+    "  lattice wake <taskId> --source <s> --cursor <c> --observation <text> [--wait <id>] [--level]",
     "  lattice index status [--json]",
     "  lattice index setup --agent-id <id> [--days N] [--agentsview <path>] [--client <path>] [--python <path>] [--credential-file <path>] [--enable]",
     "  lattice index disable",

@@ -26,6 +26,11 @@ export interface ToolContext {
   workspaceRoot: string;
   realm: string;
   timeoutMs?: number;
+  // Explicit environment overlay the caller authorizes for tool children.
+  // Ambient process.env is NEVER inherited: children are built from the
+  // shared allowlist base plus this overlay plus per-call args (see
+  // platform/childEnv.ts). Absent means no overlay.
+  envOverlay?: Record<string, string> | undefined;
 }
 
 export interface Tool<TArgs> {

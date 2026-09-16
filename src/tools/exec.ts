@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { buildChildEnv, toolEnvOverlay } from "../platform/childEnv.js";
 import type { ToolDefinition } from "../providers/types.js";
 import { resolveInScope } from "../platform/paths.js";
 import { toolFailure, type Tool, type ToolContext, type ToolResult } from "./types.js";
@@ -50,14 +51,8 @@ export const EXEC_DEFINITION: ToolDefinition = {
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_BYTES = 256 * 1024;
 
-function baseEnv(extra: Record<string, string> | undefined): Record<string, string> {
-  const keep: Record<string, string> = {};
-  const passthrough = ["PATH", ...(process.platform === "win32" ? ["SystemRoot", "TEMP", "TMP"] : ["HOME", "LANG", "TZ"])];
-  for (const key of passthrough) {
-    const value = process.env[key];
-    if (value !== undefined) keep[key] = value;
-  }
-  return { ...keep, ...(extra ?? {}) };
+function baseEnv(context: ToolContext, extra: Record<string, string> | undefined): Record<string, string> {
+  return buildChildEnv(toolEnvOverlay(context, extra));
 }
 
 function resolveCommand(args: ExecArgs): { executable: string; argv: string[] } | { error: string } {
@@ -170,7 +165,7 @@ export class ExecTool implements Tool<ExecArgs> {
     try {
       child = spawn(resolved.executable, resolved.argv, {
         cwd,
-        env: baseEnv(rawArgs.env),
+        env: baseEnv(context, rawArgs.env),
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
         windowsHide: true,

@@ -205,7 +205,7 @@ describe("browser ui", () => {
         mobile: false,
       });
       await session.send("Page.navigate", { url: server.url });
-      await waitFor(session, `document.querySelector(".newtask h1")?.textContent === "Lattice Agent"`);
+      await waitFor(session, `document.querySelector(".newtask h1")?.textContent === "O que vamos construir?"`);
       const landing = await textOf(session, ".newtask");
       expect(landing).toContain("Pasta");
       expect(landing).toContain("Modelo");
@@ -231,7 +231,7 @@ describe("browser ui", () => {
         })()`,
         returnByValue: true,
       });
-      expect(landingGeometry.result.value).toEqual({ sidebarWidth: 280, composerWidth: 780, centeredDelta: 0, noLandingTopbar: true });
+      expect(landingGeometry.result.value).toEqual({ sidebarWidth: 264, composerWidth: 760, centeredDelta: 0, noLandingTopbar: true });
       await screenshot(session, path.join(dir, "landing-1440.png"));
 
       await session.send("Runtime.evaluate", { expression: `document.querySelector(".newtaskbtn")?.click()` });
@@ -250,10 +250,24 @@ describe("browser ui", () => {
         expression: `[...document.querySelectorAll(".modelpicker-actions button")].find((b) => b.textContent?.trim() === "Listar modelos")?.click()`,
       });
       await waitFor(session, `document.querySelector(".modelpicker")?.textContent?.includes("Listagem indisponível") === true`);
-      await screenshot(session, path.join(dir, "landing-model-config-1440.png"));
+      for (const width of [1440, 900]) {
+        await session.send("Emulation.setDeviceMetricsOverride", { width, height: width === 1440 ? 900 : 700, deviceScaleFactor: 1, mobile: false });
+        const panelBounds = await session.send<{ result: { value?: unknown } }>("Runtime.evaluate", {
+          expression: `(() => {
+            const panel = document.querySelector(".newtask-modelconfig").getBoundingClientRect();
+            return panel.top >= 0 && panel.left >= 0 && panel.right <= innerWidth && panel.bottom <= innerHeight;
+          })()`, returnByValue: true,
+        });
+        expect(panelBounds.result.value).toBe(true);
+        await screenshot(session, path.join(dir, `landing-model-config-${width}.png`));
+      }
+      await session.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
       await session.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
       await session.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
       await waitFor(session, `document.querySelector(".newtask-modelconfig") === null`);
+      await session.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 1, mobile: false });
+      await screenshot(session, path.join(dir, "landing-900.png"));
+      await session.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 
       await session.send("Runtime.evaluate", { expression: `document.querySelector(".workspace-contextbtn")?.click()` });
       await waitFor(session, `document.querySelector("#new-task-workspace-picker") !== null`);
@@ -266,6 +280,7 @@ describe("browser ui", () => {
         expression: `[...document.querySelectorAll(".sidebar-nav .navitem")].find((b) => b.textContent?.includes("Configurações"))?.click()`,
       });
       await waitFor(session, `document.querySelector("#settings-title")?.textContent === "Configurações"`);
+      await waitFor(session, `document.querySelector(".provider-detail h3")?.textContent === "OpenAI"`);
       const settingsBody = await textOf(session, ".settings-content");
       expect(settingsBody).toContain("Padrão atual");
       expect(settingsBody).toContain("OpenAI");
@@ -323,22 +338,22 @@ describe("browser ui", () => {
       await session.send("Runtime.evaluate", {
         expression: `[...document.querySelectorAll(".settings-navitem")].find((b) => b.textContent?.trim() === "Providers")?.click()`,
       });
-      await waitFor(session, `[...document.querySelectorAll(".settings-card h3")].some((h) => h.textContent?.includes("OpenAI"))`);
+      await waitFor(session, `[...document.querySelectorAll(".provider-detail h3")].some((h) => h.textContent?.includes("OpenAI"))`);
       await session.send("Runtime.evaluate", {
         expression: `(() => {
-          const input = document.querySelector('.settings-card input[type="password"]');
+          const input = document.querySelector('.provider-detail input[type="password"]');
           if (!(input instanceof HTMLInputElement)) return;
           input.focus();
           document.execCommand("insertText", false, "sk-test-secret-that-must-not-leak");
         })()`,
       });
       await session.send("Runtime.evaluate", {
-        expression: `[...document.querySelectorAll(".settings-card button")].find((b) => b.textContent?.trim() === "Salvar em memória")?.click()`,
+        expression: `[...document.querySelectorAll(".provider-detail button")].find((b) => b.textContent?.trim() === "Salvar chave")?.click()`,
       });
-      await waitFor(session, `document.querySelector(".settings-content")?.textContent?.includes("só em memória") === true`);
+      await waitFor(session, `document.querySelector(".settings-content")?.textContent?.includes("Credencial salva em memória") === true`);
       const secretState = await session.send<{ result: { value?: unknown } }>("Runtime.evaluate", {
         expression: `(() => ({
-          cleared: document.querySelector('.settings-card input[type="password"]')?.value === "",
+          cleared: document.querySelector('.provider-detail input[type="password"]')?.value === "",
           leaked: document.querySelector(".settings-content")?.textContent?.includes("sk-test-secret-that-must-not-leak") === true,
         }))()`,
         returnByValue: true,
@@ -480,11 +495,16 @@ describe("browser ui", () => {
             detailPosition: getComputedStyle(detail).position,
             centerKeepsWorkingHeight: center.getBoundingClientRect().height >= 600,
             composerVisible: composerRect.top < window.innerHeight && composerRect.bottom <= window.innerHeight,
+            composerUncovered: (() => {
+              const button = composer.querySelector("button");
+              const rect = button.getBoundingClientRect();
+              return button.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+            })(),
           };
         })()`,
         returnByValue: true,
       });
-      expect(narrowLayout.result.value).toEqual({ detailPosition: "absolute", centerKeepsWorkingHeight: true, composerVisible: true });
+      expect(narrowLayout.result.value).toEqual({ detailPosition: "absolute", centerKeepsWorkingHeight: true, composerVisible: true, composerUncovered: true });
 
       await session.send("Runtime.evaluate", {
         expression: `document.querySelector(".detail-head button")?.click()`,
@@ -495,6 +515,17 @@ describe("browser ui", () => {
       });
       await waitFor(session, `document.querySelector(".sidebar")?.classList.contains("collapsed") === true`);
       expect(await textOf(session, ".topbar")).toContain("Lattice Agent");
+      // 1440×900 at 200% zoom has a 720×450 CSS layout viewport.
+      await session.send("Emulation.setDeviceMetricsOverride", { width: 720, height: 450, deviceScaleFactor: 2, mobile: false });
+      const zoomControls = await session.send<{ result: { value?: unknown } }>("Runtime.evaluate", {
+        expression: `(() => [...document.querySelectorAll(".composer button, .rail-toggle, .model-button")].every((button) => {
+          const rect = button.getBoundingClientRect();
+          return rect.top >= 0 && rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+        }) && document.documentElement.scrollWidth <= innerWidth)()`, returnByValue: true,
+      });
+      expect(zoomControls.result.value).toBe(true);
+      await screenshot(session, path.join(dir, "zoom-200-equivalent.png"));
+      await session.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 1, mobile: false });
       await session.send("Runtime.evaluate", {
         expression: `document.querySelector(".railhead button")?.click()`,
       });
@@ -550,12 +581,15 @@ describe("browser ui", () => {
 
       const shots = [
         path.join(dir, "landing-1440.png"),
+        path.join(dir, "landing-900.png"),
+        path.join(dir, "landing-model-config-900.png"),
         path.join(dir, "landing-model-config-1440.png"),
         path.join(dir, "settings-1440.png"),
         path.join(dir, "settings-geral-1440.png"),
         path.join(dir, "ajuda-1440.png"),
         path.join(dir, "shot-1440.png"),
         path.join(dir, "shot-900.png"),
+        path.join(dir, "zoom-200-equivalent.png"),
         path.join(dir, "model-config-1440.png"),
         path.join(dir, "edit-detail-1440.png"),
       ];

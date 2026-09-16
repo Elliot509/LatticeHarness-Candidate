@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 const META_SCHEMA_KEY = "schema_version";
 
 export class FutureSchemaError extends Error {
@@ -149,9 +149,24 @@ CREATE TABLE IF NOT EXISTS pending_revisions (
 // a genuine previous-version database without duplicating the schema.
 export { V1_SCHEMA as V1_SCHEMA_SQL };
 
+// R1 v3 (composition identity, F-0010): per-task composition epochs. The
+// table is ALSO created lazily by composition.ts (ensureTable) so databases
+// that skip migrate (tests opening raw handles) still work; the migration
+// keeps versioned databases honest and future-schema checks meaningful.
+const V3_SCHEMA = `
+CREATE TABLE IF NOT EXISTS composition_epochs (
+  task_id TEXT PRIMARY KEY,
+  epoch INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  composition TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   { toVersion: 1, destructive: false, sql: V1_SCHEMA },
   { toVersion: 2, destructive: false, sql: V2_SCHEMA },
+  { toVersion: 3, destructive: false, sql: V3_SCHEMA },
 ];
 
 export function readSchemaVersion(db: DatabaseSync): number {

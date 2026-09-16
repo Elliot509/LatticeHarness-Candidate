@@ -55,18 +55,79 @@ function detectEol(text: string): "\r\n" | "\n" {
   return text.includes("\r\n") ? "\r\n" : "\n";
 }
 
+// Atomic file replacement in the same directory/filesystem: temp O_EXCL,
+// optional fsync where the platform honors it, mode copied from the
+// original when given, then rename. Best-effort fsync: failure to flush
+// does not fail the write (the OS/page-cache contract varies), but the
+// rename itself is atomic on POSIX and on Windows for same-volume moves,
+// which is the old-or-new guarantee that matters here. Not a power-loss
+// proof: that claim is never made (see ARCH §9 reconciliation note).
+function writeAtomic(absolute: string, content: Buffer, mode?: number): void {
+  const dir = path.dirname(absolute);
+  const stamp = `${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  const temporary = path.join(dir, `.${path.basename(absolute)}.${stamp}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(temporary, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, mode ?? 0o666);
+    fs.writeFileSync(fd, content);
+    try {
+      fs.fsyncSync(fd);
+    } catch {
+      // Flush is best effort across platforms/filesystems; the atomic
+      // rename below is the durability boundary this tool guarantees.
+    }
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(temporary, absolute);
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Best effort.
+      }
+    }
+    try {
+      fs.rmSync(temporary, { force: true });
+    } catch {
+      // Cleanup is best effort; a leftover .tmp never masks the target.
+    }
+  }
+}
+
 export class EditTool implements Tool<EditOperation> {
   readonly definition = EDIT_DEFINITION;
+  // Serialized Lattice writers: the runtime is single-process/local-first,
+  // but two replaces on one path must never interleave read→prepare→write.
+  // A module-local promise chain per canonical path is the minimal keyed
+  // mutex. External writers are NOT covered (documented limit, ARCH §9).
+  private static readonly locks = new Map<string, Promise<void>>();
 
   execute(rawArgs: EditOperation, context: ToolContext): Promise<ToolResult> {
-    return Promise.resolve(this.executeSync(rawArgs, context));
-  }
-
-  private executeSync(rawArgs: EditOperation, context: ToolContext): ToolResult {
     const absolute = resolveInWorkspace(context.workspaceRoot, rawArgs.path);
     if (absolute === null) {
-      return toolFailure("invalid-args", "edit path escapes the workspace", false);
+      return Promise.resolve(toolFailure("invalid-args", "edit path escapes the workspace", false));
     }
+    // Keyed queue: every caller chains its whole synchronous mutation onto
+    // the TAIL and replaces the tail with its own completion. The previous
+    // version dropped the chain when a holder finished out of order; this
+    // version threads completions so all queued writers run in arrival
+    // order. executeSync itself is synchronous, so no interleave is possible
+    // once queued — the chain only orders arrival.
+    const prior = EditTool.locks.get(absolute) ?? Promise.resolve();
+    const run = prior.then(() => this.executeSync(rawArgs, context, absolute));
+    // The tail must never reject (a throw inside executeSync is already a
+    // ToolResult via the inner try/catch, but guard anyway so one failure
+    // cannot break the queue for later writers).
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    EditTool.locks.set(absolute, tail);
+    return run;
+  }
+
+  private executeSync(rawArgs: EditOperation, context: ToolContext, absolute: string): ToolResult {
     try {
       switch (rawArgs.kind) {
         case "create":
@@ -97,7 +158,9 @@ export class EditTool implements Tool<EditOperation> {
       return toolFailure("precondition", `create refused: ${args.path} already exists`, false);
     }
     fs.mkdirSync(path.dirname(absolute), { recursive: true });
-    fs.writeFileSync(absolute, args.content);
+    // Atomic create: temp in the SAME directory + rename, so a crash leaves
+    // either absence or the complete file, never a truncated partial.
+    writeAtomic(absolute, Buffer.from(args.content, "utf8"));
     const after = contentVersion(Buffer.from(args.content, "utf8"));
     return {
       status: "completed",
@@ -140,8 +203,23 @@ export class EditTool implements Tool<EditOperation> {
     if (eol === "\r\n") {
       newText = newText.replace(/\r(?!\n)|(?<!\r)\n/g, "\r\n");
     }
-    fs.writeFileSync(absolute, newText);
-    const after = contentVersion(Buffer.from(newText, "utf8"));
+    // Atomic replace: validate → prepare → temp in the same filesystem →
+    // revalidate precondition immediately before the swap → rename → observe
+    // the final bytes. Mode preserved from the original. A crash leaves the
+    // old file or the complete new file; reconciliation classifies UNKNOWN.
+    const beforeStat = fs.statSync(absolute);
+    const prepared = Buffer.from(newText, "utf8");
+    const current = fs.readFileSync(absolute);
+    if (contentVersion(current).valueOf() !== currentVersion.valueOf()) {
+      return toolFailure(
+        "stale-version",
+        `replace refused: file changed during prepare (observed ${contentVersion(current)}, expected ${args.expectedVersion})`,
+        false,
+      );
+    }
+    writeAtomic(absolute, prepared, beforeStat.mode & 0o777);
+    const observed = fs.readFileSync(absolute);
+    const after = contentVersion(observed);
     const beforeStored = storedPreview(before);
     const afterStored = storedPreview(Buffer.from(newText, "utf8"));
     return {

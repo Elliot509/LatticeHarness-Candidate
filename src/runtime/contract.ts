@@ -10,6 +10,14 @@ export interface Grant {
   };
 }
 
+export interface TypedHardRestrictions {
+  readonly denyOperations?: readonly string[];
+  readonly denyTargets?: readonly string[];
+  readonly denyProviders?: readonly string[];
+  readonly denyModels?: readonly string[];
+  readonly denyRealms?: readonly string[];
+}
+
 export interface TaskContract {
   taskId: string;
   rootId: string;
@@ -20,6 +28,10 @@ export interface TaskContract {
   obligations: readonly string[];
   grants: readonly Grant[];
   prohibitions: readonly string[];
+  // Optional typed hard restrictions (machine-enforceable deny rules
+  // evaluated by the authority kernel). Free-text `prohibitions` stay
+  // GUIDANCE: rendered to the model, never hard enforcement.
+  restrictions?: TypedHardRestrictions | undefined;
   realm: string;
   allowedProvider: string | null;
   allowedModel: string | null;
