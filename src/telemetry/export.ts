@@ -10,7 +10,7 @@ import type { AttemptStatus, AttemptUsage } from "./usage.js";
 // (latest revision each), last line `export_complete`. The export is a
 // downstream projection: it never touches the loop, holds no locks, and a
 // missing exporter never affects execution. This module stops at the local
-// file; anything beyond (AgentsView, ranking) is S4.
+// file; anything beyond it is a downstream consumer concern.
 
 export const EXPORT_SCHEMA_VERSION = 1;
 

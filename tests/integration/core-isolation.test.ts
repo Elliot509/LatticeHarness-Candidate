@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runTaskCommand } from "../../src/cli/run.js";
 
 // Core isolation: every external-integration failure mode must leave normal
-// task execution untouched. The ranking stack is OPTIONAL; these tests break
-// each of its pieces in turn and prove a fake-provider task still completes.
+// task execution untouched. Optional external tooling is never on the task
+// hot path; these tests break the surrounding environment in turn and prove
+// a fake-provider task still completes.
 
 let dirs: string[] = [];
 afterEach(() => {
@@ -53,40 +54,18 @@ async function runSmallTask(extraEnv: Record<string, string | undefined> = {}): 
   }
 }
 
-describe("core isolation from the ranking stack", () => {
+describe("core isolation from external tooling", () => {
   it("runs without python on PATH", async () => {
     const code = await runSmallTask({ PATH: "" });
     expect([0, 2, 3]).toContain(code);
   });
 
-  it("runs with broken agentsview/client/plow configuration present", async () => {
+  it("runs with broken external-tool configuration present", async () => {
     const code = await runSmallTask({
       LATTICE_EXPORTS_DIR: "/nonexistent-exports",
       AGENTSVIEW_DATA_DIR: "/nonexistent-avdata",
       AGENT_INDEX_AGENTS: "lattice",
       HERMES_HOME: "/nonexistent-hermes",
-    });
-    expect([0, 2, 3]).toContain(code);
-  });
-
-  it("runs with a corrupt index state directory", async () => {
-    const { workspace, dataDir } = fresh();
-    const indexDir = path.join(dataDir, "index");
-    fs.mkdirSync(indexDir, { recursive: true });
-    fs.writeFileSync(path.join(indexDir, "config.json"), "{corrupt");
-    fs.writeFileSync(path.join(indexDir, "state.json"), "{corrupt");
-    const script = path.join(workspace, "steps.json");
-    fs.writeFileSync(script, JSON.stringify([{ text: "done" }]));
-    const lines: string[] = [];
-    const code = await runTaskCommand({
-      workspace,
-      dataDir,
-      task: "Isolated task",
-      acceptance: ["done"],
-      providerName: "fake",
-      model: "fake-model-1",
-      fakeScriptPath: script,
-      onOutput: (line) => lines.push(line),
     });
     expect([0, 2, 3]).toContain(code);
   });

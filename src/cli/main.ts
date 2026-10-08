@@ -7,7 +7,6 @@ import { claimOwnership, currentSchemaVersion, openLatticeDb } from "../storage/
 import { SCHEMA_VERSION } from "../storage/schema.js";
 import { runTaskCommand } from "./run.js";
 import { exportCommand, resumeCommand, sessionsCommand, wakeCommand } from "./continuity.js";
-import { indexDisableCommand, indexSetupCommand, indexStatusCommand, indexTickCommand } from "./index.js";
 import { uiCommand } from "./ui.js";
 
 const PACKAGE_VERSION = "0.0.0";
@@ -39,11 +38,7 @@ function printHelp(): void {
     "  lattice resume <taskId> [--json]",
     "  lattice export --session <id> --out <path>",
     "  lattice wake <taskId> --source <s> --cursor <c> --observation <text> [--wait <id>] [--level]",
-    "  lattice index status [--json]",
-    "  lattice index setup --agent-id <id> [--days N] [--agentsview <path>] [--client <path>] [--python <path>] [--credential-file <path>] [--enable]",
-    "  lattice index disable",
-    "  lattice index report [--dry-run]",
-  "  lattice ui [--workspace <path>] [--port <n>] [--no-open]",
+    "  lattice ui [--workspace <path>] [--port <n>] [--no-open]",
   "",
   "With no arguments, lattice opens the local UI for the current directory.",
   "",
@@ -155,22 +150,6 @@ interface WakeOptions {
   level: boolean;
 }
 
-interface IndexOptions {
-  command: "index";
-  workspace?: string | undefined;
-  dataDir?: string | undefined;
-  subcommand: "status" | "setup" | "disable" | "report";
-  agentId?: string | undefined;
-  days?: number | undefined;
-  agentsviewPath?: string | undefined;
-  clientScript?: string | undefined;
-  pythonPath?: string | undefined;
-  credentialFile?: string | undefined;
-  enable: boolean;
-  dryRun: boolean;
-  json: boolean;
-}
-
 interface UiOptions {
   command: "ui";
   workspace?: string | undefined;
@@ -187,8 +166,8 @@ function takeValue(argv: readonly string[], index: number, flag: string): string
   return value;
 }
 
-function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOptions | SessionsOptions | ResumeOptions | ExportOptions | WakeOptions | IndexOptions {
-  let command: "status" | "run" | "ui" | "sessions" | "resume" | "export" | "wake" | "index" = argv.length === 0 ? "ui" : "status";
+function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOptions | SessionsOptions | ResumeOptions | ExportOptions | WakeOptions {
+  let command: "status" | "run" | "ui" | "sessions" | "resume" | "export" | "wake" = argv.length === 0 ? "ui" : "status";
   let workspace: string | undefined;
   let dataDir: string | undefined;
   let json = false;
@@ -212,14 +191,6 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
   let wakeObservation: string | undefined;
   let wakeWaitId: string | undefined;
   let wakeLevel = false;
-  let indexAgentId: string | undefined;
-  let indexDays: number | undefined;
-  let indexAgentsview: string | undefined;
-  let indexClient: string | undefined;
-  let indexPython: string | undefined;
-  let indexCredentialFile: string | undefined;
-  let indexEnable = false;
-  let indexDryRun = false;
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -258,31 +229,6 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
       i += 1;
     } else if (arg === "--level") {
       wakeLevel = true;
-    } else if (arg === "--agent-id") {
-      indexAgentId = takeValue(argv, i + 1, arg);
-      i += 1;
-    } else if (arg === "--days") {
-      const raw = takeValue(argv, i + 1, arg);
-      i += 1;
-      const parsed = Number.parseInt(raw, 10);
-      if (!Number.isInteger(parsed) || parsed <= 0) fail("--days must be a positive integer");
-      indexDays = parsed;
-    } else if (arg === "--agentsview") {
-      indexAgentsview = takeValue(argv, i + 1, arg);
-      i += 1;
-    } else if (arg === "--client") {
-      indexClient = takeValue(argv, i + 1, arg);
-      i += 1;
-    } else if (arg === "--python") {
-      indexPython = takeValue(argv, i + 1, arg);
-      i += 1;
-    } else if (arg === "--credential-file") {
-      indexCredentialFile = takeValue(argv, i + 1, arg);
-      i += 1;
-    } else if (arg === "--enable") {
-      indexEnable = true;
-    } else if (arg === "--dry-run") {
-      indexDryRun = true;
     } else if (arg === "--provider") {
       providerName = takeValue(argv, i + 1, arg);
       i += 1;
@@ -329,9 +275,9 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
     } else if (arg === "--version" || arg === "-V") {
       process.stdout.write(`${PACKAGE_VERSION}\n`);
       process.exit(0);
-    } else if (arg === "status" || arg === "run" || arg === "ui" || arg === "sessions" || arg === "resume" || arg === "export" || arg === "wake" || arg === "index") {
-      // The first command word wins: later positionals (index subcommands,
-      // task ids) must not flip the command.
+    } else if (arg === "status" || arg === "run" || arg === "ui" || arg === "sessions" || arg === "resume" || arg === "export" || arg === "wake") {
+      // The first command word wins: later positionals (task ids) must not
+      // flip the command.
       if (command !== "status") {
         positional.push(arg);
         continue;
@@ -342,7 +288,6 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
       if (arg === "resume") command = "resume";
       if (arg === "export") command = "export";
       if (arg === "wake") command = "wake";
-      if (arg === "index") command = "index";
       continue;
     } else if (arg?.startsWith("--")) {
       fail(`unknown option ${arg} (see --help)`);
@@ -351,9 +296,9 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
     }
   }
   if (positional.length > 1) fail("at most one workspace argument is accepted");
-  // Resume, wake and index take ids/subcommands positionally; every other
-  // command takes an optional workspace there.
-  const idCommands = command === "resume" || command === "wake" || command === "index";
+  // Resume and wake take ids positionally; every other command takes an
+  // optional workspace there.
+  const idCommands = command === "resume" || command === "wake";
   if (!idCommands && positional.length === 1 && workspace !== undefined) {
     fail("pass the workspace either positionally or via --workspace, not both");
   }
@@ -426,28 +371,6 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
       level: wakeLevel,
     };
   }
-  if (command === "index") {
-    const subcommand = positional[0];
-    if (subcommand !== "status" && subcommand !== "setup" && subcommand !== "disable" && subcommand !== "report") {
-      fail("index requires a subcommand: status, setup, disable or report");
-    }
-    if (subcommand === "setup" && indexAgentId === undefined) fail("index setup requires --agent-id");
-    return {
-      command: "index",
-      workspace: resolvedWorkspace,
-      dataDir,
-      subcommand,
-      ...(indexAgentId !== undefined ? { agentId: indexAgentId } : {}),
-      ...(indexDays !== undefined ? { days: indexDays } : {}),
-      ...(indexAgentsview !== undefined ? { agentsviewPath: indexAgentsview } : {}),
-      ...(indexClient !== undefined ? { clientScript: indexClient } : {}),
-      ...(indexPython !== undefined ? { pythonPath: indexPython } : {}),
-      ...(indexCredentialFile !== undefined ? { credentialFile: indexCredentialFile } : {}),
-      enable: indexEnable,
-      dryRun: indexDryRun,
-      json,
-    };
-  }
   return { command: "status", workspace: resolvedWorkspace, dataDir, json };
 }
 
@@ -514,7 +437,7 @@ function renderHuman(report: StatusReport): string {
 }
 
 export function main(argv: readonly string[] = process.argv.slice(2)): void {
-  let options: StatusOptions | RunOptions | UiOptions | SessionsOptions | ResumeOptions | ExportOptions | WakeOptions | IndexOptions;
+  let options: StatusOptions | RunOptions | UiOptions | SessionsOptions | ResumeOptions | ExportOptions | WakeOptions;
   try {
     options = parseArgs(argv);
   } catch (error) {
@@ -594,42 +517,6 @@ export function main(argv: readonly string[] = process.argv.slice(2)): void {
     })
       .then((code) => process.exit(code))
       .catch((error: unknown) => fail("wake failed", error));
-    return;
-  }
-  if (options.command === "index") {
-    const workspace = options.workspace ?? process.cwd();
-    if (options.subcommand === "status") {
-      indexStatusCommand({ workspace, dataDir, json: options.json })
-        .then((code) => process.exit(code))
-        .catch((error: unknown) => fail("index status failed", error));
-      return;
-    }
-    if (options.subcommand === "setup") {
-      if (options.agentId === undefined) fail("index setup requires --agent-id");
-      indexSetupCommand({
-        workspace,
-        dataDir,
-        agentId: options.agentId,
-        ...(options.days !== undefined ? { days: options.days } : {}),
-        ...(options.agentsviewPath !== undefined ? { agentsviewPath: options.agentsviewPath } : {}),
-        ...(options.clientScript !== undefined ? { clientScript: options.clientScript } : {}),
-        ...(options.pythonPath !== undefined ? { pythonPath: options.pythonPath } : {}),
-        ...(options.credentialFile !== undefined ? { credentialFile: options.credentialFile } : {}),
-        enable: options.enable,
-      })
-        .then((code) => process.exit(code))
-        .catch((error: unknown) => fail("index setup failed", error));
-      return;
-    }
-    if (options.subcommand === "disable") {
-      indexDisableCommand({ workspace, dataDir })
-        .then((code) => process.exit(code))
-        .catch((error: unknown) => fail("index disable failed", error));
-      return;
-    }
-    indexTickCommand(workspace, dataDir, options.dryRun)
-      .then((code) => process.exit(code))
-      .catch((error: unknown) => fail("index report failed", error));
     return;
   }
   let report: StatusReport;

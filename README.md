@@ -4,7 +4,7 @@ Lattice runs a coding model against a project on your machine. It gives the
 model tools to inspect files, make edits and run commands, and keeps a local
 record of the work so you can inspect results and continue unfinished tasks.
 
-**Status:** publicly available, actively developed, version `0.0.0`.
+**Status:** development prerelease, version `0.0.0`.
 Benchmarking and further validation are still in progress. This release makes
 no comparative performance claims.
 
@@ -264,7 +264,7 @@ there is no native-addon build step. Git is needed for the clone command
 below, but not for running an installed package. A browser is optional for
 CLI use. Hosted providers may require their own account and API key.
 
-Build from the [public repository](https://github.com/Elliot509/LatticeHarness-Candidate):
+With authorized access to the [private Candidate repository](https://github.com/Elliot509/LatticeHarness-Candidate):
 
 ```sh
 git clone https://github.com/Elliot509/LatticeHarness-Candidate.git
@@ -372,38 +372,16 @@ and repeat the verification flags, which are not stored as CLI configuration.
 `--workspace` and `--data-dir` are global options. Commands accepting a
 positional workspace must not also receive `--workspace`.
 
-## Optional Agent Index reporting
-
-Agent Index reporting is separate from task execution and disabled by default.
-The [public Lattice listing](https://aiworthusing.com/agent-index/lattice)
-is not a comparative benchmark result.
-
-```text
-lattice index status [--json]
-lattice index setup --agent-id <id> [--days N] [--agentsview <path>]
-  [--client <path>] [--python <path>] [--credential-file <path>] [--enable]
-lattice index report [--dry-run]
-lattice index disable
-```
-
-This integration requires Python 3, an `agentsview` build with Lattice support,
-the compatible Agent Index client and reporting credentials. Setup validates
-prerequisites and writes local configuration. `--enable` enables reporting in
-that configuration; it does not install a recurring OS scheduler. Registration
-and scheduler installation remain separate steps. Reporting aggregates daily
-model token counts rather than prompts, patches or tool transcripts.
-
 ## Local data and privacy
 
 The database is `lattice.db` in `--data-dir` or `$LATTICE_DATA_DIR`. Defaults
 are `$XDG_DATA_HOME/lattice` (otherwise `~/.local/share/lattice`) on Linux and
 `%LOCALAPPDATA%\Lattice` on Windows. Non-secret UI provider defaults live in
-`lattice.product.json`; optional reporting has separate state.
+`lattice.product.json`.
 
 Model requests send task text, tool schemas and observed content to the
 configured endpoint. Provider discovery also contacts that endpoint, and
 commands executed in a workspace can make their own network requests.
-Optional reporting adds its own external communication.
 
 Provider keys are kept separate from product configuration, and usage export
 checks for secret-shaped data. These checks are not universal redaction:
@@ -424,9 +402,7 @@ npm run pack:test         # package inspection and isolated install smokes
 ```
 
 Tests use scripted providers and local fixtures for runtime behavior, authority,
-path checks, recovery, migrations and HTTP/UI flows. Browser tests need
-Chromium; the external Agent Index chain needs its compatible helper tools.
-Those paths are skipped when prerequisites are absent.
+path checks, recovery, migrations and HTTP/UI flows. Browser tests need Chromium and are skipped when it is absent.
 
 For source navigation, start with `src/cli/run.ts` and `src/server/tasks.ts`,
 then `src/runtime/loop.ts`. Admission and receipts live in

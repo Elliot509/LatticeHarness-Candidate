@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 // Tarball hygiene: the distributable must never carry credentials, install
@@ -51,27 +50,6 @@ describe("distribution hygiene", () => {
     for (const forbidden of FORBIDDEN_PATHS) {
       expect(files.some((file) => file.includes(forbidden)), `tarball contains ${forbidden}`).toBe(false);
     }
-    expect(files).toContain("dist/index/adapter.js");
-    expect(files).toContain("dist/cli/index.js");
-  });
-
-  it("keeps patch fixtures free of credential-shaped content", () => {
-    const patchDir = path.resolve("scripts/index-patches");
-    for (const file of fs.readdirSync(patchDir)) {
-      const text = fs.readFileSync(path.join(patchDir, file), "utf8");
-      for (const pattern of SECRET_PATTERNS.slice(0, 4)) {
-        expect(text, `${file} matches ${pattern}`).not.toMatch(pattern);
-      }
-    }
-  });
-
-  it("keeps index fixtures synthetic", () => {
-    const fixtureDir = path.resolve("fixtures/index");
-    for (const file of fs.readdirSync(fixtureDir)) {
-      const text = fs.readFileSync(path.join(fixtureDir, file), "utf8");
-      expect(text).not.toContain("PLOW_AGENT_TOKEN");
-      expect(text).not.toContain("aik_");
-    }
-    expect(dirs).toEqual([]);
+    expect(files).toContain("dist/cli/main.js");
   });
 });
