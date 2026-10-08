@@ -40,20 +40,18 @@
     "pack:test": "node scripts/pack-test.mjs"
   },
   "devDependencies": {
-    "@electron/packager": "^18.3.9",
     "@eslint/js": "^9.18.0",
     "@types/node": "^22.20.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "electron": "44.5.1",
-    "electron-builder": "^26.5.2",
     "esbuild": "^0.28.2",
     "eslint": "^9.18.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0",
-    "vitest": "^3.0.5"
+    "vitest": "4.1.11"
   },
   "allowScripts": {
     "electron@44.5.1": true,
