@@ -1,245 +1,230 @@
-# Lattice
+# Lattice Harness
 
-Lattice is a local agent harness: choose a project, describe a task, connect a
-model, and inspect the files, commands and results behind its answer. The
-runtime keeps task history and usage in SQLite on your machine.
+A local, task-oriented agent harness with real tools, durable execution records,
+and explicit verification. **Experimental prerelease · 0.0.0 · MIT.**
 
-**Development prerelease · version 0.0.0.** Lattice is experimental. There is
-no verified public installer or download for this source revision. Internal
-engineering bundles are distinct from a supported, signed release.
+An agent harness connects a model to a controlled execution loop. Lattice keeps
+an objective, an authority contract and evidence around that loop: which request
+was sent, which effect was admitted, what actually ran, what remains uncertain,
+and why the task can finish or needs human input. Its tools change files and run
+processes; the conversation is one view of that work.
 
-[Getting started](#getting-started) · [Installation](#installation) ·
-[How it works](#how-it-works) · [Limits and security](#limits-and-security) ·
-[Development](#development)
+[Install](#installation) · [First task](#first-task) · [Português](#primeiro-uso-em-português)
+· [Architecture](#architecture) · [Security](SECURITY.md) · [Contributing](#development)
 
-## What you can do
+## Current capabilities
 
-- Inspect files and directories, make version-checked edits, and run project commands.
-- Use an OpenAI-compatible hosted or local model endpoint; discover model IDs
-  when its API supports listing, or enter an ID manually.
-- Follow activity, inspect retained output, send guidance, request a model
-  change, and stop an active task.
-- Verify a simple filesystem objective or a coding test result, with explicit
-  waiting, input-needed, blocked, completed and cancelled states.
-- Close and reopen retained history, and continue eligible unfinished work
-  under its existing contract and remaining limits.
+- Tasks with an original objective, acceptance criteria, workspace and optional limits.
+- Path/text search, bounded file reads and expansion, version-checked edits.
+- Explicit argv or shell execution; supervised process polling, input, stop and waiting.
+- Admission → claim → receipt for effects, request binding and durable SQLite ledgers.
+- Observed usage accounting, uncertain reservations and `UNKNOWN` effects.
+- Proportional verification: a directory/file observation, recognized passing tests,
+  or an analysis response, according to the task contract.
+- Durable history and eligible continuation under the existing contract and budget.
+- OpenAI-compatible provider configuration, model discovery/manual IDs, guidance and
+  model switching. Active and pending selections are distinct.
+- A web UI and an Electron desktop shell with a native project chooser.
 
-Lattice does not supply a model subscription, project toolchains or guaranteed
-model correctness. Commands run with your user privileges.
+There is one execution engine. MCP, subagents, semantic memory, a universal planner
+and a general prompt-injection defense are not current capabilities. The retired
+Agent Index/Plow integration is absent from the active product.
 
 ## Installation
 
-### Desktop engineering bundles
+### Source checkout — publicly reproducible route
 
-A maintainer can provide a private Linux x64 TAR or Windows x64 ZIP with a
-pinned Electron runtime included. Starting that application requires no
-system Node, npm, Git, Python or Docker. Commands requested for your project
-may still require those tools.
-
-| Environment | Engineering route | Qualification |
-| --- | --- | --- |
-| Arch / Archcraft | Extract the complete TAR; run `./lattice-p0` as your normal desktop user. Optional `sh install-desktop.sh` adds a user menu entry. | Current-host engineering validation; no formal Arch support claim. |
-| Ubuntu 24.04 | Extract the TAR. Where Chromium sandbox policy requires it, run `sudo sh install-ubuntu.sh` once, then launch normally from the menu. | Setup installs a new root-owned whole-app prefix and sandbox helper. Current sprint changes require a fresh guest regression. |
-| Windows 11 x64 | Extract the complete ZIP to a writable directory; double-click `Lattice.vbs`, keeping `app` beside it. The CMD launcher is for diagnostics. | Unsigned private engineering artifact; current sprint changes require a fresh Windows regression. |
-
-The Ubuntu setup refuses to overwrite an existing installation. It does not
-disable the sandbox or modify global AppArmor/kernel settings. Never set a
-privileged sandbox helper inside a user-writable application tree.
-
-Existing private archives predate this reliability sprint. They do not
-establish that the new source changes have been packaged or tested on all
-three systems. See [portable instructions](desktop/PORTABLE.md) for the bundle
-layout, sandbox setup, data directories and removal.
-
-The [Candidate repository](https://github.com/Elliot509/LatticeHarness-Candidate)
-was private when inspected on 2026-10-08 and had no published GitHub releases.
-No public download button or registry installation is offered here.
-
-### Run from an existing source checkout
-
-Requires Node.js **22.13.0 or newer** and npm. Git is needed only to obtain a
-checkout by cloning. A desktop graphical session is needed for Electron;
-a browser is needed for the web UI. SQLite is built into Node.
+Requires **Node.js >=22.13.0**, npm, and Git for cloning. A browser is needed for the
+web UI; project commands require their own toolchains. SQLite comes from Node.
 
 ```sh
-npm ci
+git clone https://github.com/Elliot509/LatticeHarness-Candidate.git
+cd LatticeHarness-Candidate
+npm ci --ignore-scripts
 npm run build
-node dist/cli/main.js ui --workspace /path/to/project
+node dist/cli/main.js ui --workspace /path/to/disposable-project
 ```
 
-These are developer instructions, not a one-click consumer installer.
-For a desktop source launch after building:
+Create the project directory first. The command prints a local address; open it
+in your browser. `--ignore-scripts` avoids downloading Electron during this
+web/CLI setup. It does not install an Electron runtime. Only run tasks against
+projects and commands you trust.
 
-```sh
-node_modules/.bin/electron dist/desktop/main.cjs
-```
+The current source was tested on the maintainer's Archcraft Linux x64 host with
+Node 26.10.0 and a pinned Electron 44.5.1 runtime. Node 24.19.0 has an additional
+local verification check. The exact 22.13.0 floor has a runtime gate and CI matrix,
+but was not available for a fresh local run; that is a validation gap.
 
-Use the native project chooser before starting work. Do not select your whole
-home directory or a drive root as the task's project.
+### Local npm artifact — CLI and web UI
 
-## Getting started
+There is no registry installation claim. From a built checkout, `npm pack`
+creates a small local package. Pack/install tests exercise an isolated global
+prefix, `npm exec`, the installed CLI/UI, a real code-edit/test fixture and a
+v1→v3 SQLite migration. `desktop/PORTABLE.md` is included in this package.
 
-1. Open Lattice and choose **Pasta / Escolher projeto**. Select a bounded
-   project containing only the work you intend to authorize.
-2. Open **Modelo / Configurar**. Choose the provider and endpoint. OpenRouter
-   is a preset; use the actual model ID returned by its API or supplied by
-   your provider. No Muse model identifier is hardcoded.
-3. Enter the key in the session credential field and choose **Configurar
-   chave**. The field clears; the key stays in backend memory for that
-   provider and endpoint until the app closes.
-4. List/search models when available, or enter the exact ID manually. Choose
-   **Usar este modelo**. Listing proves API discovery, not inference quality
-   or tool support. No universal XHIGH support is assumed.
-5. Describe the task. For a first controlled task, try **Create directory
-   Muse** inside a disposable project. Optional call/token limits are
-   available before starting.
-6. Follow the objective, activity and result. A successful command alone is
-   not proof that the task's criteria were satisfied. Inspect errors and
-   uncertain effects before repeating work.
-7. Reopen a task from the session list to inspect retained history. Keys must
-   be entered again after closing the app. **Retomar** continues eligible
-   unfinished work; it does not reset its budget or replay a confirmed action.
+The npm package contains compiled application code and documentation. It
+**does not include the Electron runtime** and is distinct from a portable desktop
+application. It is not a download from a published npm release.
 
-Use **Interromper** to request a stop. Cancellation waits for supervised
-process cleanup; uncertain cleanup is reported rather than presented as success.
+### Electron desktop — runtime included in a portable bundle
 
-## How it works
+A complete portable bundle contains the application, compiled UI/backend and a
+pinned Electron runtime. It needs a graphical desktop and compatible system
+libraries, but no system Node, npm, Git or Python to open Lattice. Commands in
+your selected project may still need those programs.
 
-The Electron shell owns a sandboxed renderer and a backend utility process.
-The React UI communicates with the backend through authenticated loopback HTTP
-and SSE. The CLI uses the same task loop. SQLite stores contracts, run
-manifests, intents, attempts, reservations, receipts, events, waits and usage.
+**No public portable binary, signed installer or GitHub release is offered for
+this revision.** A maintainer has validated a new Linux x64 bundle locally; a
+private local path is not a public download. Use the source route above until a
+separately qualified artifact is actually distributed.
+
+| Platform | Current status | Portable launch route, when a qualified bundle is supplied |
+|---|---|---|
+| Arch / Archcraft Linux x64 | Native engineering test on the current host; no formal distribution support claim. | Extract the entire bundle and run `./lattice-p0` as a normal desktop user. |
+| Ubuntu 24.04 x64 | New artifact not tested in a guest in this sprint. | See [portable instructions](desktop/PORTABLE.md), including the conditional sandbox setup. |
+| Windows 11 x64 | New artifact not tested on Windows in this sprint. | A qualified complete ZIP would use `Lattice.vbs` with its adjacent `app` directory. |
+
+Keep an old installation until the alternative is validated. Close it before
+opening another instance on the same data directory. No automatic menu replacement,
+data cleanup or profile migration is part of these instructions. The exact local
+bundle and isolated launch instructions are delivered separately to its owner.
+
+## First task
+
+1. Open the web UI or a qualified desktop bundle. Choose a **disposable project**;
+   desktop uses **Pasta / Escolher projeto**, web mode stays inside its served root.
+2. Open **Modelo / Configurar** and choose **OpenRouter**. Confirm the endpoint.
+3. Enter your key directly in **Chave de API da sessão**, then **Configurar chave**.
+   The field clears; the backend retains it for this provider/endpoint session.
+   Never put a key in chat, an objective, an endpoint URL or a project file.
+4. Discover models if supported, or enter the exact model ID your account exposes.
+   Choose **Usar este modelo**. No Muse ID, availability, price or XHIGH option is
+   assumed; discovery alone does not prove successful inference.
+5. Start with an absent target and this objective:
+
+   > Crie uma pasta chamada TesteMuse dentro deste projeto e confirme que ela existe.
+
+6. Expand **Critério de conclusão opcional** and enter
+   `directory-exists:TesteMuse`. This removes linguistic ambiguity. Optional call
+   and cumulative token limits are separate controls.
+7. Start the task. Inspect the original objective, tool activity, output and
+   acceptance result. Expect the target directory to exist and state **Concluído**
+   (`COMPLETED`); command exit 0 or the model saying “done” alone is insufficient.
+8. Close and reopen to inspect retained history. Reenter the key for a new session.
+   **Interromper** cancels work; it must not be interpreted as successful completion.
+
+Local fixtures have exercised tool use and verification without paid inference.
+**Muse/OpenRouter real inference remains a human test**, not a claimed successful
+provider qualification. If an effect is `UNKNOWN`, inspect it before retrying.
+
+## Primeiro uso em português
+
+A rota de código-fonte acima exige Node/npm; o aplicativo portátil completo inclui
+seu runtime. No aplicativo novo: escolha uma pasta descartável, configure
+OpenRouter, insira a chave somente no campo local e selecione o ID exato do modelo
+Muse disponível na sua conta. Copie a tarefa e o critério do tutorial acima.
+Veja as ferramentas e a verificação antes de considerar **Concluído** um sucesso.
+O histórico persiste; a chave de sessão não. Windows/Ubuntu e inferência paga ainda
+exigem suas próprias validações. Não há link de binário público nesta revisão.
+
+## Architecture
 
 ```mermaid
-flowchart LR
-  UI[Desktop / web / CLI] --> Contract[Task contract]
-  Contract --> Context[Bounded task context]
-  Context --> Admission[Admission + claim]
-  Admission --> Model[Model endpoint]
-  Model --> Receipt[Usage + receipt]
-  Receipt --> Tools[Admitted tools]
-  Tools --> Context
-  Receipt --> Acceptance[Acceptance checks]
-  Acceptance --> Result[Complete / wait / ask / block]
+flowchart TD
+    O[Objective / TaskContract] --> B[Model request binding]
+    B --> A[Authority / admission / claim]
+    A --> P[Compatible provider]
+    P --> T[Tool proposal]
+    T --> G[Tool authority / admission / claim]
+    G --> X[Tool execution]
+    X --> R[Receipt / ledger]
+    P --> R
+    R --> V[Verification]
+    V --> C[Result / continuation / human input]
+    C --> B
 ```
 
-| Tool | Observation or effect |
-| --- | --- |
-| `search` | Literal text/path search, including directories. Scope, exclusions and limits qualify absence claims. |
-| `read` | Versioned line snapshots, bounded byte ranges and expiring expansion handles. Oversized or omitted content is explicit. |
-| `edit` | Create, exact single-match replace, delete and rename. Existing content requires its expected version. Both rename targets require authority. |
-| `exec` | Explicit executable/argv or shell/command forms; malformed mixed arguments fail before spawn. Output and command time are bounded. |
-| `process` | Spawn, observe, send and stop through owner-bound handles, with bounded buffers and capacity. Handles do not survive restart. |
+The contract carries scope, grants, prohibitions, obligations and acceptance.
+A physical attempt has an identity and durable receipt; provider/model/endpoint
+are bound to the admitted request. SQLite stores sessions, runs, events, effects
+and usage. Context keeps the objective/authority and bounded recent observations;
+older evidence stays in durable records. This is bounded text context, not a
+promise about every provider's token window or native tool-conversation format.
 
-Model requests bind the actual provider, model, endpoint, tool surface,
-contract revision and payload digest before dispatch. Model changes remain
-pending until a subsequent request incorporates them. Earlier run manifests
-retain their composition. Guidance is acknowledged after incorporation into
-a bound request; it cannot retroactively change an in-flight request.
+The Electron main process owns window/project/lifecycle operations. A utility
+process runs the same backend/runtime as the web/CLI routes. The renderer uses
+a narrow preload bridge and authenticated HTTP/SSE; it does not run a separate
+agent engine.
 
-Context protects the objective, acceptance, authority and unresolved effects.
-Recent observations fit a character allowance; older omitted evidence remains
-in durable records. There is one evidence path in the request, with an omission
-notice. This is not semantic memory or automatic summarization. The current
-baseline encodes tool observations as text, rather than a complete native
-assistant/tool conversation protocol. Tool schemas add payload beyond the
-text-context allowance; that allowance is not a provider token-window guarantee.
+### Verification and large projects
 
-### Completion
+- `directory-exists:path` / `file-exists:path`: inspect the actual contained target,
+  including a preexisting target; no TAP requirement for directory creation.
+- `tests-pass`: recognized TAP or Node test summary, a clean exit, and matching
+  content observations before/after execution and at completion. At least one
+  passing test is required. Later edits invalidate the evidence.
+- `response`: an analysis answer; it certifies no filesystem correctness. An
+  editing/exec task needs appropriate verification instead.
 
-The supported acceptance vocabulary is deliberately small:
+The verifier streams content asynchronously in 64 KiB buffers. There is no
+32 MiB or 10,000-entry cutoff. Path, type, mode, size and content digest have
+unambiguous framing. Read/search observations do not rescan the whole project.
+Progress detection uses observed tool results/versions and confirmed edits;
+unrelated filesystem activity is not proof of productive work.
 
-- `directory-exists:relative/path` and `file-exists:relative/path` observe a
-  bounded target on the actual filesystem, including an already existing target.
-- `tests-pass` requires recognized test output and a clean exit, bound to a
-  bounded workspace content fingerprint. Edits after a pass invalidate it.
-- `response` allows a legitimate analysis answer without tool use. If the
-  workspace changed, test evidence is required instead.
+Content evidence excludes `.git`, `node_modules`, `dist` and `.cache` directories;
+symlink destinations, dependencies, external services and the runner environment
+are outside that proof. This is not an atomic filesystem snapshot or a guarantee
+against a malicious concurrent writer. A changing/unreadable entry or a 30-second
+observation deadline produces **unknown evidence**, never a positive verification.
+Use a quiet, bounded project and rerun tests; an explicit target criterion can
+verify a smaller filesystem task without pretending that whole-project tests
+were certified. Commands that generate source-visible artifacts may require a
+fresh run after those artifacts settle. Tests are not proof of their own quality
+or resistance to intentional modification.
 
-A narrow directory or file creation objective receives a filesystem predicate by default.
-Analysis/inspection defaults to `response`; ambiguous coding work defaults to
-`tests-pass`. API/CLI acceptance criteria are preserved. Arbitrary prose
-criteria without a verifier remain unverified; a model assertion does not
-create a new verifier. TAP and Node test-runner summary output are supported;
-other runners may need an explicit integration. These checks do not prove that
-tests are sufficient or resistant to intentional test modification.
+## Limits, security and privacy
 
-## Limits and security
+New tasks have **no implicit cumulative limit of 50 calls or 200,000 tokens**, and
+no default contract expiry. Optional user caps, request/command timeouts,
+authorization, human cancellation and lack-of-progress detection remain active.
+Observed usage is settled even above its reservation estimate; true configured
+exhaustion prevents further effects. Partial/missing usage keeps uncertainty and
+reservation. A reserve is an estimate, not a dollar-spend ceiling.
 
-New tasks have **no implicit cumulative call/token ceiling or contract expiry**.
-Use optional UI limits, API `budget: {calls, tokens}` and `expiresAt`, or CLI
-flags when a bound is desired. Existing persisted limits remain in force on
-resume. Tools do not consume model-call units.
+Tools run in a **local-trusted** realm with your user privileges. Workspace checks,
+environment filtering and Electron renderer isolation do not sandbox arbitrary
+commands at the OS level. Free-text prohibitions are guidance; typed restrictions
+are the enforced policy. There is no universal protection against malicious code,
+prompt injection or a hostile process already running as your user.
 
-Provider request timeouts, command timeouts, authorization, cancellation,
-explicit deadlines and progress detection remain separate controls. Equivalent
-observations without a workspace change eventually request human guidance;
-productive work is not stopped merely for exceeding 50 calls or 200,000 tokens.
+Provider keys live in backend session memory, scoped to provider/normalized
+endpoint; no durable key store is supplied. History/nonsecret defaults persist
+locally. Desktop uses `${XDG_DATA_HOME:-~/.local/share}/lattice` on Linux and
+`%LOCALAPPDATA%\Lattice` on Windows, including its browser profile. Keep those data
+when replacing application binaries if you want to retain history.
 
-Observed provider usage is settled even when it exceeds the reservation estimate.
-True configured exhaustion prevents additional work. Missing/partial usage
-retains an uncertain reservation; a timeout can remain `UNKNOWN`. A reservation
-is an estimate, not a financial ceiling. Provider context/output limits and
-prices are separate; Lattice does not promise a hard dollar-spend cap.
-
-**`local-trusted` is not an OS sandbox.** Commands can access files and networks
-outside their working directory with your privileges. Filesystem path checks,
-edit serialization and environment filtering do not contain arbitrary commands
-or prevent races with external writers. Free-text prohibitions are guidance;
-only typed restrictions are enforced as policy.
-
-The desktop session is bootstrapped over its private parent channel. HTTP
-requires the bound Host/Origin and an authenticated session; browser mode allows
-initial direct navigation. This limits browser-origin attacks, not a hostile
-local process running as your user. Provider keys are endpoint-scoped and never
-put in URLs; do not paste them into objectives or project files.
-
-Uncertain effects prevent blind continuation and success claims. Recovery does
-not provide general exactly-once execution, power-loss proof, process adoption
-or automatic reconciliation of every external effect. Historical task data is
-not automatically replayed or repaired by these changes.
-
-## CLI examples
-
-```sh
-node dist/cli/main.js run --workspace /path/to/project \
-  --task 'Create directory Muse' --provider local --model '<model-id>' \
-  --base-url http://127.0.0.1:8080/v1 --accept directory-exists:Muse
-```
-
-Optional bounds: `--max-calls N`, `--max-tokens N`, `--task-timeout-ms N`,
-`--max-iterations N`. These require positive integers; omit them for no bound.
-For coding verification, `--verify <executable>` and repeated `--verify-arg`
-register the exact command the model must request; they do not run it outside
-the admitted tool path.
-
-`run` returns 0 for verified completion, 2 for input needed, 3 for escalation,
-4 for stable WAIT and 1 for operational errors. `sessions`, `resume`,
-`run --resume`, `wake` and `export` inspect/continue local state; `export`
-writes usage JSONL, not a complete execution archive. See `--help`.
-
-Only the OpenAI CLI preset reads `LATTICE_API_KEY`. Use the UI for authenticated
-non-OpenAI presets. Other presets share the compatible Chat Completions adapter;
-they are endpoint metadata, not separately qualified native API clients.
-
-## Data and limitations
-
-Desktop defaults: Linux `${XDG_DATA_HOME:-~/.local/share}/lattice`; Windows
-`%LOCALAPPDATA%\Lattice`. The browser profile lives beneath that data directory.
-Nonsecret defaults and history persist; keys do not. Retain the data directory
-when removing an engineering bundle if you want to keep history.
-
-History/output can be truncated and the UI uses bounded projections. Expansion
-handles are memory-only. Runtime ownership/migration ordering and retention
-still need further hardening. There is no general prompt-injection firewall,
-network-egress policy, multi-agent scheduler, RAG store or comparative performance
-qualification. Windows/Ubuntu results from earlier bundles do not validate this
-sprint's new bytes. Formal roadmap gates have not been promoted.
+Uncertain effects prevent blind retry and success claims. Resume does not renew
+budget/authority or adopt orphan processes. Ownership/migration concurrency,
+retention/scale, general late-usage reconciliation, external writers, detached
+processes, lost acknowledgments and some accessibility behavior need further
+hardening. Historical data is not silently repaired. See [SECURITY.md](SECURITY.md)
+for the current boundary and private vulnerability-reporting route.
 
 ## Development
 
+TypeScript/Node SQLite power the runtime/backend; React and esbuild build the UI;
+Electron provides the desktop shell; Vitest and native Chromium tests verify it.
+
+| Directory | Responsibility |
+|---|---|
+| `src/runtime`, `src/context` | Contracts, effects, acceptance, accounting, loop and context |
+| `src/tools`, `src/providers` | Local tools and compatible model adapters |
+| `src/storage`, `src/server` | SQLite persistence and authenticated HTTP/SSE |
+| `src/ui`, `src/desktop` | React interface and Electron shell/backend bridge |
+| `tests`, `fixtures`, `scripts` | Regression fixtures, builds and package checks |
+
 ```sh
-npm ci
 npm run typecheck
 npm run lint
 npm run build
@@ -247,11 +232,13 @@ npm test
 npm run pack:test
 ```
 
-Browser tests need an available Chromium executable; a skipped/unavailable
-browser does not validate renderer behavior. Deterministic fixture providers
-exercise integration without spending real provider credit. Packaged platform
-qualification additionally requires testing the exact distributed artifact.
+Browser tests require a usable Chromium executable; unavailable/skipped tests
+cannot qualify browser behavior. Fixtures exercise real effects with synthetic
+model responses. Native Electron and exact portable artifacts require separate
+checks; npm pack does not prove either. CI includes Node 22.13.0/24.x on Linux
+and Windows; a configured matrix is not a claim that every run passed.
 
-Before contributing, describe the behavior and verification, preserve unrelated
-work, and exclude credentials, local databases and private operator material.
-Licensed under [MIT](LICENSE).
+Contributions should identify the behavior, regression and evidence; preserve
+unrelated work and exclude keys, local databases, logs, profiles and operator
+material. Propose independent changes separately. Licensed under [MIT](LICENSE);
+Electron's bundled upstream notices accompany its runtime in portable artifacts.

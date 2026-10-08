@@ -7,10 +7,10 @@ development HEAD until a stable release line is declared.
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately to the repository maintainers (open a
-private security advisory on GitHub once the repository is public, or
-contact the maintainers directly). Do not open a public issue with exploit
-details.
+Report vulnerabilities privately to the repository maintainers. If GitHub
+offers private vulnerability reporting in the Security tab, use that route;
+otherwise contact the maintainers privately before sharing details. Do not
+open a public issue with exploit details.
 
 Please include: affected version/commit, steps to reproduce, and the
 impact you observed. We will acknowledge receipt, assess the report, and

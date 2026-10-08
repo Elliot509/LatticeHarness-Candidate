@@ -24,6 +24,7 @@
     "dist/telemetry",
     "dist/tools",
     "dist/ui",
+    "desktop/PORTABLE.md",
     "README.md",
     "LICENSE"
   ],

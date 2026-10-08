@@ -68,6 +68,7 @@ try {
   if (!entries.some((e) => e === "package/package.json")) {
     fail("tarball misses package/package.json");
   }
+  if (!entries.includes("package/desktop/PORTABLE.md")) fail("tarball misses portable documentation referenced by README");
   for (const asset of ["package/dist/ui/index.html", "package/dist/ui/app.js", "package/dist/ui/app.css"]) {
     if (!entries.some((e) => e === asset)) {
       fail(`tarball misses ${asset}`);
@@ -175,6 +176,9 @@ try {
     .map((middle) => path.join(prefix, middle, "node_modules", "lattice-harness", "dist", "cli", "main.js"))
     .find((candidate) => fs.existsSync(candidate));
   if (installedMain === undefined) fail(`installed entrypoint missing under prefix: ${prefix}`);
+  const installedPortable = path.join(path.dirname(installedMain), "..", "..", "desktop", "PORTABLE.md");
+  if (fs.readFileSync(installedPortable, "utf8") !== fs.readFileSync(path.join(root, "desktop", "PORTABLE.md"), "utf8")) fail("installed portable documentation differs from source");
+  process.stdout.write("pack-test: installed portable documentation matches source\n");
   const uiWs = path.join(scratch, "ui workspace");
   fs.mkdirSync(uiWs, { recursive: true });
   const uiData = path.join(scratch, "ui-data");
