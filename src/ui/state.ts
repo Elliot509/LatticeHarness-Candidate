@@ -24,11 +24,14 @@ export interface UiState {
   lastSeq: number;
   seenIds: string[];
   draft: string;
+  drafts?: Record<string, string>;
   detailId: string | null;
   sidebarOpen: boolean;
   pending: PendingCommand[];
   error: string | null;
+  actionError?: string | null;
   needsResync: boolean;
+  resyncTarget?: number;
   view: UiView;
   sessionFilter: string;
 }
@@ -58,6 +61,9 @@ export type UiAction =
   | { type: "connection"; connection: ConnectionState; error?: string }
   | { type: "request-resync" }
   | { type: "draft"; draft: string }
+  | { type: "task-draft"; taskId: string; draft: string }
+  | { type: "command-failed"; commandId: string; taskId: string; error: string }
+  | { type: "clear-action-error" }
   | { type: "select-detail"; detailId: string | null }
   | { type: "toggle-sidebar" }
   | { type: "command-sent"; command: PendingCommand }
@@ -70,19 +76,25 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
     case "sessions":
       return { ...state, sessions: action.sessions };
     case "open-task":
+      if (state.activeTaskId === action.taskId) return { ...state, view: "task" };
       return {
         ...state,
         activeTaskId: action.taskId,
+        drafts: { ...state.drafts, [state.activeTaskId ?? "new"]: state.draft },
+        draft: state.activeTaskId === action.taskId ? state.draft : state.drafts?.[action.taskId] ?? "",
         task: null,
         lastSeq: 0,
         seenIds: [],
         detailId: null,
         pending: [],
         error: null,
+        actionError: null,
         needsResync: false,
+        resyncTarget: 0,
         connection: "loading",
       };
     case "snapshot": {
+      if (action.snapshot.taskId === state.activeTaskId && action.snapshot.cut < state.lastSeq) return state;
       // Snapshot replaces projections but never the local draft, the open
       // detail, the sidebar or pending command echoes.
       const lastSeq = action.snapshot.cut;
@@ -103,15 +115,15 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         lastSeq,
         seenIds,
         pending,
-        needsResync: false,
+        needsResync: lastSeq < (state.resyncTarget ?? 0),
         error: null,
       };
     }
     case "event": {
       const event = action.event;
+      if (event.kind === "resync") return { ...state, needsResync: true, resyncTarget: Math.max(state.resyncTarget ?? 0, event.cut, event.seq, state.lastSeq) };
       if (event.seq <= state.lastSeq) return state;
-      if (event.seq > state.lastSeq + 1) return { ...state, needsResync: true };
-      if (event.kind === "resync") return { ...state, needsResync: true };
+      if (event.seq > state.lastSeq + 1) return { ...state, needsResync: true, resyncTarget: Math.max(state.resyncTarget ?? 0, event.seq) };
       if (state.task === null) return { ...state, lastSeq: event.seq };
       const task = applyEvent(state.task, event);
       if (task === null) return { ...state, lastSeq: event.seq };
@@ -131,6 +143,12 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
       return { ...state, needsResync: true };
     case "draft":
       return { ...state, draft: action.draft };
+    case "task-draft":
+      return state.activeTaskId === action.taskId ? { ...state, draft: action.draft } : { ...state, drafts: { ...state.drafts, [action.taskId]: action.draft } };
+    case "command-failed":
+      return state.activeTaskId === action.taskId ? { ...state, actionError: action.error, pending: state.pending.filter(command => command.commandId !== action.commandId) } : state;
+    case "clear-action-error":
+      return { ...state, actionError: null };
     case "select-detail":
       return { ...state, detailId: action.detailId };
     case "toggle-sidebar":
@@ -142,7 +160,7 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
     case "session-filter":
       return { ...state, sessionFilter: action.filter };
     case "clear-task":
-      return { ...state, activeTaskId: null, task: null, pending: [], detailId: null, view: "task" };
+      return { ...state, drafts: { ...state.drafts, [state.activeTaskId ?? "new"]: state.draft }, draft: state.drafts?.["new"] ?? "", activeTaskId: null, task: null, pending: [], detailId: null, view: "task" };
   }
 }
 

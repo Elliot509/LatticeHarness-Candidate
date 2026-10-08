@@ -5,10 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { armFault, clearFaults } from "../../src/runtime/faults.js";
 import {
   cancelActiveWaits,
+  acknowledgePendingRevisions,
   consumeFiredWait,
   dueWaits,
   edgeWakeId,
   enterWait,
+  HandleWaiter,
   levelWakeId,
   listActiveWaits,
   notePendingRevision,
@@ -51,6 +53,20 @@ const REQUEST = {
 };
 
 describe("wait entry", () => {
+  it("re-arms a consumed condition and never fires another task's deadline", async () => {
+    const db = database();
+    const { waitId } = enterWait(db, TASK, REQUEST);
+    recordWake(db, TASK, { wakeId: "explicit-once", waitId, edge: true, source: "human", cursor: "1", observation: "poll now" });
+    consumeFiredWait(db, TASK, waitId);
+    expect(enterWait(db, TASK, REQUEST)).toEqual({ waitId, created: true });
+    cancelActiveWaits(db, TASK, "fixture cleanup");
+    enterWait(db, "other-task", { ...REQUEST, kind: "deadline", source: "other-deadline", deadline: new Date(0).toISOString() });
+    const waiter = new HandleWaiter(db, TASK, { pollProcess: () => Promise.resolve({ running: true as const }) }, "owned only");
+    expect(await waiter.check()).toBeNull();
+    expect(listActiveWaits(db, "other-task")).toHaveLength(1);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM wake_events WHERE task_id = 'other-task'").get()).toMatchObject({ n: 0 });
+  });
+
   it("enters once and returns the existing wait on re-entry", () => {
     const db = database();
     const first = enterWait(db, TASK, REQUEST);
@@ -166,13 +182,15 @@ describe("wake gate", () => {
 });
 
 describe("pending revisions", () => {
-  it("persists revisions arriving mid-activation and takes them exactly once", () => {
+  it("persists revisions arriving mid-activation and retains them until request binding acknowledges them", () => {
     const db = database();
     notePendingRevision(db, TASK, 4, { text: "forbid /tmp writes" });
     notePendingRevision(db, TASK, 4, { text: "forbid /tmp writes" });
     notePendingRevision(db, TASK, 5, { text: "extend deadline" });
     const taken = takePendingRevisions(db, TASK);
     expect(taken.map((entry) => entry.revision)).toEqual([4, 5]);
+    expect(takePendingRevisions(db, TASK)).toEqual(taken);
+    acknowledgePendingRevisions(db, TASK, [4, 5]);
     expect(takePendingRevisions(db, TASK)).toEqual([]);
   });
 });

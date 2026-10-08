@@ -58,7 +58,7 @@ export interface ApiClient {
   command(command: UiCommand): Promise<CommandResult>;
   subscribe(taskId: string, onEvent: (event: UiEvent) => void, onStatus: (status: "live" | "dropped") => void): () => void;
   providers(): Promise<ProviderPresetView[]>;
-  providerStatus(): Promise<ProviderKeyStatus[]>;
+  providerStatus(providerId?: string, baseUrl?: string | null): Promise<ProviderKeyStatus[]>;
   removeProviderKey(providerId: string): Promise<{ removed: boolean }>;
   providerModels(providerId: string, baseUrl?: string | null): Promise<ModelsOutcome>;
   testProvider(providerId: string, baseUrl?: string | null): Promise<ConnectionOutcome>;
@@ -132,8 +132,11 @@ export function createApi(base: string): ApiClient {
     return body.providers;
   }
 
-  async function providerStatus(): Promise<ProviderKeyStatus[]> {
-    const response = await fetch(`${base}/api/providers/status`);
+  async function providerStatus(providerId?: string, baseUrl?: string | null): Promise<ProviderKeyStatus[]> {
+    const params = new URLSearchParams();
+    if (providerId) params.set("provider", providerId);
+    if (baseUrl) params.set("baseUrl", baseUrl);
+    const response = await fetch(`${base}/api/providers/status?${params}`);
     if (!response.ok) throw new Error(await readError(response));
     const body = (await response.json()) as { status: ProviderKeyStatus[] };
     return body.status;
@@ -224,8 +227,7 @@ export function createApi(base: string): ApiClient {
       };
       source.onerror = () => {
         onStatus("dropped");
-        source?.close();
-        if (!stopped) window.setTimeout(connect, 2000);
+        // Native reconnection retains Last-Event-ID for durable replay.
       };
       source.onopen = () => { onStatus("live"); };
     };

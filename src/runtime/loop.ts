@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import {
   compileSurface,
   type EvidenceItem,
@@ -10,19 +10,22 @@ import {
   admitDurable,
   claimDurable,
   recordReceiptDurable,
-  recordUsageRevision,
   taskBudgetSnapshot,
 } from "./effects.js";
 import {
   cancelActiveWaits,
   enterWait,
   takePendingRevisions,
+  acknowledgePendingRevisions,
   type WaitKind,
   type WaitRequest,
 } from "./wait.js";
 import { recordTaskEvent } from "./continuity.js";
 import type { AttemptStatus, AttemptUsage } from "../telemetry/usage.js";
 import type { TaskContract } from "./contract.js";
+import { isContractExpired } from "./contract.js";
+import { exceedsLimit } from "./budget.js";
+import { advanceCompositionEpoch, bindRequest, compositionForRoute, payloadDigest, type RequestBinding } from "./composition.js";
 import type {
   ModelRequest,
   ModelResponse,
@@ -56,7 +59,7 @@ export interface LoopOptions {
   db: DatabaseSync;
   provider: ProviderAdapter;
   model: string;
-  modelRef?: { provider: ProviderAdapter; model: string };
+  modelRef?: { provider: ProviderAdapter; model: string; providerId?: string; endpoint?: string | null };
   contract: TaskContract;
   sessionId: string;
   runId: string;
@@ -64,8 +67,8 @@ export interface LoopOptions {
   tools: RegisteredTool[];
   toolContext: ToolContext;
   ownerGeneration: number;
-  grantedCalls: number;
-  grantedTokens: number;
+  grantedCalls: number | null;
+  grantedTokens: number | null;
   maxIterations?: number;
   // Optional durable execution-activity limit (R1 D-R1-02): caps the number
   // of tool dispatches for this activation. Unset means unbounded by this
@@ -75,8 +78,16 @@ export interface LoopOptions {
   maxToolDispatches?: number | undefined;
   contextChars?: number;
   signal?: AbortSignal;
-  acceptanceVerifiers?: Array<() => AcceptanceCheck>;
+  acceptanceVerifiers?: Array<(response?: ModelResponse) => AcceptanceCheck | Promise<AcceptanceCheck>>;
+  verifyAfterTools?: boolean;
+  beforeRequest?: () => void;
+  onRequestBound?: (binding: RequestBinding) => void;
+  afterRequestBound?: () => void;
   waiter?: LoopWaiter | undefined;
+  // An alive owner may retain this activation while waiting for a process.
+  // CLI callers without this hook retain the existing stable-WAIT exit.
+  // The hook observes readiness only; check() still commits/consumes wakes.
+  awaitWake?: (wait: NonNullable<LoopStop["wait"]>) => Promise<void>;
   onEvent?: (event: LoopEvent) => void;
   onModelText?: (text: string) => void;
 }
@@ -94,6 +105,7 @@ export type LoopEvent =
   | { kind: "model-response"; requestId: string; attemptId: string; toolCalls: number }
   | { kind: "tool-start"; attemptId: string; tool: string }
   | { kind: "tool-end"; attemptId: string; tool: string; status: string; handle?: string | undefined }
+  | { kind: "wake"; text: string }
   | { kind: "stop"; decision: LoopDecision; reason: string };
 
 function actionFingerprint(tool: string, argsJson: string): string {
@@ -104,21 +116,37 @@ function isPromise(value: unknown): value is Promise<{ wait: WaitRequest } | { w
   return value instanceof Promise;
 }
 
+function isAborted(signal: AbortSignal | undefined): boolean { return signal?.aborted === true; }
+
 export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
-  const maxIterations = options.maxIterations ?? 25;
+  const maxIterations = options.maxIterations;
   const contextChars = options.contextChars ?? 24_000;
   const evidence: EvidenceItem[] = [];
-  const seenActions: string[] = [];
+  const observations: string[] = [];
+  let stagnant = 0;
   let iterations = 0;
   let modelCalls = 0;
   let toolDispatches = 0;
-  const requestId = `req-${randomUUID()}`;
+  let editRevision = 0;
+  const noteObservation = (action: string, text: string): boolean => {
+    // Progress is scoped to actual observations and confirmed edits. No whole
+    // workspace scan per tool; unrelated external changes cannot prove progress.
+    const observation = createHash("sha256").update(JSON.stringify([action, text, editRevision])).digest("hex");
+    stagnant = observations.includes(observation) ? stagnant + 1 : 0;
+    observations.push(observation);
+    if (observations.length > 8) observations.shift();
+    return stagnant >= 4;
+  };
+  const noProgress = (): LoopStop => stop("ASK", "no progress: repeated equivalent observations without observed progress; human guidance required", iterations, modelCalls, toolDispatches, options);
 
   for (;;) {
-    if (options.signal?.aborted === true) {
+    if (isAborted(options.signal)) {
       return stop("STOP", "interrupted by user", iterations, modelCalls, toolDispatches, options);
     }
-    if (iterations >= maxIterations) {
+    if (isContractExpired(options.contract)) {
+      return stop("ESCALATE", "contract expired", iterations, modelCalls, toolDispatches, options);
+    }
+    if (maxIterations !== undefined && iterations >= maxIterations) {
       return stop(
         "ESCALATE",
         `iteration budget exhausted after ${iterations} iterations without verified completion`,
@@ -142,12 +170,20 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
     }
     if (waitCheck !== null) {
       if ("woke" in waitCheck) {
-        evidence.push({ id: `ev-${evidence.length + 1}`, text: `Wake observed: ${waitCheck.woke.text}` });
+        const text = waitCheck.woke.text;
+        evidence.push({ id: `ev-${evidence.length + 1}`, text: `Wake observed: ${text.slice(0, 4000)}${text.length > 4000 ? "\n[observation truncated in model context; full durable wake retained]" : ""}` });
+        options.onEvent?.({ kind: "wake", text });
       } else {
-        return enterWaiting(options, waitCheck.wait, iterations, modelCalls, toolDispatches);
+        const waiting = enterWaiting(options, waitCheck.wait, iterations, modelCalls, toolDispatches);
+        if (options.awaitWake === undefined || waiting.wait?.kind !== "process") return waiting;
+        await options.awaitWake(waiting.wait);
+        iterations -= 1;
+        continue;
       }
     }
-    for (const pending of takePendingRevisions(options.db, options.contract.taskId)) {
+    options.beforeRequest?.();
+    const pendingRevisions = takePendingRevisions(options.db, options.contract.taskId);
+    for (const pending of pendingRevisions) {
       evidence.push({
         id: `ev-${evidence.length + 1}`,
         text: `Revision ${pending.revision} arrived during activation and was revalidated at a safe point: ${describePending(pending.payload)}`,
@@ -169,19 +205,39 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
     }
 
     const admittedAt = new Date();
+    const requestId = `req-${randomUUID()}`;
+    const provider = activeProvider(options);
+    const providerId = options.modelRef?.providerId ?? provider.name;
+    const model = activeModel(options);
+    const request: ModelRequest = {
+      model, system: surface.system, messages: [{ role: "user", content: surface.task }],
+      tools: structuredClone(options.tools.map((tool) => tool.definition)),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    };
+    const digest = payloadDigest(request);
+    const epoch = advanceCompositionEpoch(options.db, options.contract.taskId,
+      compositionForRoute(providerId, model, request.tools, provider.adapterRevision, surface.surfaceVersion, options.modelRef?.endpoint));
+    const before = snapshotBudget(options);
+    if ((before.granted.tokens !== null && before.settled.tokens + before.reserved.tokens >= before.granted.tokens) ||
+        (before.granted.calls !== null && before.settled.calls + before.reserved.calls >= before.granted.calls)) {
+      return stop("ESCALATE", "configured cumulative budget exhausted; outstanding reservations remain accounted", iterations, modelCalls, toolDispatches, options);
+    }
     const modelAttempt = admitDurable(
       options.db,
       options.contract,
       {
         taskId: options.contract.taskId,
         operation: "model.invoke",
-        target: `${activeProvider(options).name}/${activeModel(options)}`,
+        target: `${providerId}/${model}`,
         actionKey: `model:${activeProvider(options).name}:${activeModel(options)}:${surface.surfaceVersion}:${iterations}`,
         authorityRevision: options.contract.revision,
         maxCalls: 1,
-        maxTokens: 4000,
-        argsJson: JSON.stringify({ surfaceVersion: surface.surfaceVersion }),
+        maxTokens: estimateReservation(options, surface),
+        argsJson: JSON.stringify({ surfaceVersion: surface.surfaceVersion, payloadDigest: digest, endpoint: options.modelRef?.endpoint ?? null }),
         requestId,
+        provider: providerId,
+        model,
+        realm: options.toolContext.realm,
       },
       { calls: options.grantedCalls, tokens: options.grantedTokens },
       options.ownerGeneration,
@@ -200,6 +256,16 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
         options,
       );
     }
+    const binding = bindRequest({ db: options.db, taskId: options.contract.taskId, requestId, attemptId: modelAttempt.attemptId,
+      contractRevision: options.contract.revision, epoch, provider: providerId, model, request });
+    options.db.exec("BEGIN IMMEDIATE");
+    try {
+      recordTaskEvent(options.db, options.contract.taskId, "request-binding", { ...binding });
+      acknowledgePendingRevisions(options.db, options.contract.taskId, pendingRevisions.map((pending) => pending.revision));
+      options.onRequestBound?.(binding);
+      options.db.exec("COMMIT");
+    } catch (error) { options.db.exec("ROLLBACK"); throw error; }
+    options.afterRequestBound?.();
     const claim = claimDurable(options.db, modelAttempt.attemptId, options.ownerGeneration, options.contract.revision, {
       contract: options.contract,
       now: new Date(),
@@ -224,32 +290,16 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
     }
     options.onEvent?.({ kind: "model-request", requestId, attemptId: modelAttempt.attemptId });
 
-    const history: ModelRequest["messages"] = evidence.map((item) => ({
-      role: "user" as const,
-      content: item.text,
-    }));
     let response: ModelResponse;
     const dispatchedAt = new Date();
+    modelCalls += 1;
     try {
-      response = await activeProvider(options).complete({
-        model: activeModel(options),
-        system: surface.system,
-        messages: [{ role: "user", content: surface.task }, ...history],
-        tools: options.tools.map((tool) => tool.definition),
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      });
+      if (payloadDigest(request) !== binding.payloadDigest) throw new Error("request changed after binding; dispatch refused");
+      response = await provider.complete(request);
     } catch (error) {
       const finishedAt = new Date();
       const uncertain = isUncertainProviderError(error);
-      recordReceiptDurable(options.db, {
-        attemptId: modelAttempt.attemptId,
-        outcome: uncertain ? "unknown" : "failed",
-        summary: `model invocation ${uncertain ? "uncertain" : "failed"}: ${errorMessage(error)}`,
-        detailJson: JSON.stringify({ kind: errorName(error) }),
-        settledCalls: 1,
-        settledTokens: 0,
-      });
-      recordModelUsage(options, {
+      const usageDocument = modelUsageDocument(options, {
         attemptId: modelAttempt.attemptId,
         intentId: modelAttempt.intentId,
         requestId,
@@ -262,16 +312,19 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
         dispatchedAt,
         finishedAt,
       });
-      if (uncertain) {
-        evidence.push({
-          id: `ev-${evidence.length + 1}`,
-          text: `Model call outcome UNKNOWN (${errorMessage(error)}); reconciled before any retry.`,
-        });
-        continue;
-      }
+      recordReceiptDurable(options.db, {
+        attemptId: modelAttempt.attemptId,
+        outcome: uncertain ? "unknown" : "failed",
+        summary: `model invocation ${uncertain ? "uncertain" : "failed"}: ${errorMessage(error)}`,
+        detailJson: JSON.stringify({ kind: errorName(error), usageFinal: false }),
+        settledCalls: 1,
+        settledTokens: 0,
+        releaseUnused: false,
+        usageDocument,
+      });
       return stop(
         "ESCALATE",
-        `model invocation failed: ${errorMessage(error)}`,
+        `model invocation ${uncertain ? "UNKNOWN; reconcile before retry" : "failed"}: ${errorMessage(error)}`,
         iterations,
         modelCalls,
         toolDispatches,
@@ -279,21 +332,24 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
       );
     }
     const finishedAt = new Date();
-    modelCalls += 1;
     options.onEvent?.({ kind: "model-response", requestId, attemptId: modelAttempt.attemptId, toolCalls: response.toolCalls.length });
     if (response.text.trim() !== "") {
       options.onModelText?.(response.text.slice(0, 2000));
     }
     settleModelUsage(options, modelAttempt.attemptId, modelAttempt.intentId, requestId, response, admittedAt, dispatchedAt, finishedAt);
+    const budget = snapshotBudget(options);
+    if (exceedsLimit(budget.settled.calls, budget.granted.calls) || exceedsLimit(budget.settled.tokens, budget.granted.tokens)) {
+      return stop("ESCALATE", "configured cumulative budget exceeded by observed provider usage; response accounted, no further effects authorized", iterations, modelCalls, toolDispatches, options);
+    }
 
     if (response.toolCalls.length === 0) {
-      const verification = checkAcceptanceEvident(options.acceptanceVerifiers ?? []);
+      const verification = await checkCompletion(options, response);
       if (verification.complete) {
         return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
       }
       return stop(
         "ASK",
-        `model stalled with text and acceptance criteria unverified: ${response.text.slice(0, 300)}`,
+        `acceptance criteria unverified: ${verification.reason}; ${response.text.slice(0, 300)}`,
         iterations,
         modelCalls,
         toolDispatches,
@@ -302,24 +358,18 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
     }
 
     for (const call of response.toolCalls) {
+      if (isAborted(options.signal)) {
+        return stop("STOP", "interrupted by user", iterations, modelCalls, toolDispatches, options);
+      }
       const registered = options.tools.find((tool) => tool.name === call.name);
       if (registered === undefined) {
         evidence.push({
           id: `ev-${evidence.length + 1}`,
           text: `Unknown tool requested: ${call.name}. Available: ${options.tools.map((tool) => tool.name).join(", ")}.`,
         });
+        if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), "unknown tool")) return noProgress();
         continue;
       }
-      const fingerprint = actionFingerprint(call.name, call.argumentsJson);
-      if (seenActions.filter((entry) => entry === fingerprint).length >= 2) {
-        evidence.push({
-          id: `ev-${evidence.length + 1}`,
-          text: `Refused to repeat ${call.name} with identical arguments and no new information; provide new evidence or a different action.`,
-        });
-        continue;
-      }
-      seenActions.push(fingerprint);
-
       // Optional execution-activity cap (R1 D-R1-02): counts dispatches, not
       // model calls. Unset = unbounded by this mechanism. The check runs
       // BEFORE admission so a capped tool never reserves, claims, or
@@ -329,6 +379,7 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
           id: `ev-${evidence.length + 1}`,
           text: `Tool ${call.name} denied: tool dispatch limit reached (${toolDispatches}/${options.maxToolDispatches}); no dispatch, no claim.`,
         });
+        if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), "dispatch limit reached")) return noProgress();
         continue;
       }
       const admission = admitDurable(
@@ -343,6 +394,8 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
           maxCalls: 0,
           maxTokens: 0,
           argsJson: call.argumentsJson,
+          realm: options.toolContext.realm,
+          ...(call.name === "edit" ? { additionalTargets: renameTargets(call.argumentsJson) } : {}),
         },
         { calls: options.grantedCalls, tokens: options.grantedTokens },
         options.ownerGeneration,
@@ -354,6 +407,7 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
           return stop("ESCALATE", admission.detail, iterations, modelCalls, toolDispatches, options);
         }
         evidence.push({ id: `ev-${evidence.length + 1}`, text: `Tool ${call.name} denied: ${admission.detail}` });
+        if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), admission.detail)) return noProgress();
         continue;
       }
       const toolClaim = claimDurable(options.db, admission.attemptId, options.ownerGeneration, options.contract.revision, {
@@ -370,11 +424,12 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
           settledTokens: 0,
         });
         evidence.push({ id: `ev-${evidence.length + 1}`, text: `Tool ${call.name} claim refused (${toolClaim.reason}).` });
+        if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), toolClaim.reason)) return noProgress();
         continue;
       }
       options.onEvent?.({ kind: "tool-start", attemptId: admission.attemptId, tool: call.name });
       toolDispatches += 1;
-      const summary = await invokeTool(registered, call.argumentsJson, options.toolContext);
+      const summary = await invokeTool(registered, call.argumentsJson, { ...options.toolContext, ownerGeneration: options.ownerGeneration, attemptId: admission.attemptId, ...(options.signal !== undefined ? { signal: options.signal } : {}) });
       recordReceiptDurable(options.db, {
         attemptId: admission.attemptId,
         outcome: summary.outcome,
@@ -391,6 +446,14 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
         ...(summary.handleId !== undefined ? { handle: summary.handleId } : {}),
       });
       evidence.push({ id: `ev-${evidence.length + 1}`, text: summary.text });
+      if (summary.outcome === "unknown") return stop("ESCALATE", "tool effect UNKNOWN; reconcile before further work", iterations, modelCalls, toolDispatches, options);
+      if (call.name === "edit" && summary.outcome === "confirmed") editRevision += 1;
+      const observedVersion = (JSON.parse(summary.detailJson) as { version?: unknown }).version ?? null;
+      if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), JSON.stringify([summary.text, observedVersion]))) return noProgress();
+    }
+    if (options.verifyAfterTools === true) {
+      const verification = await checkCompletion(options);
+      if (verification.complete) return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
     }
   }
 }
@@ -512,7 +575,7 @@ interface ModelUsageSample {
 // Every physical model dispatch leaves an AttemptUsage revision in the
 // ledger, including failures and UNKNOWN outcomes: unknown is never zero,
 // and late corrections revise the same attempt instead of duplicating it.
-function recordModelUsage(options: LoopOptions, sample: ModelUsageSample): void {
+function modelUsageDocument(options: LoopOptions, sample: ModelUsageSample): string {
   const normalized =
     sample.usage === null
       ? null
@@ -522,6 +585,12 @@ function recordModelUsage(options: LoopOptions, sample: ModelUsageSample): void 
           cacheRead: asIntOrNull(sample.usage.cacheReadTokens),
           cacheWrite: asIntOrNull(sample.usage.cacheWriteTokens),
           reasoningSubset: asIntOrNull(sample.usage.reasoningTokens),
+          // Provider-declared input partition convention (TELEMETRY §3).
+          // Only a boolean declared at the wire boundary is honored; any
+          // other shape stays unknown so telemetry keeps partitions UNKNOWN.
+          ...(sample.usage.inclusiveInput === true || sample.usage.inclusiveInput === false
+            ? { inclusiveInput: sample.usage.inclusiveInput }
+            : {}),
           source: `${activeProvider(options).name}/${activeProvider(options).adapterRevision}`,
         });
   const unknownQuantity = { value: null, quality: "unknown" as const, source: "lattice" };
@@ -536,12 +605,12 @@ function recordModelUsage(options: LoopOptions, sample: ModelUsageSample): void 
     parentAttemptId: null,
     intentId: sample.intentId,
     executorGeneration: options.ownerGeneration,
-    provider: activeProvider(options).name,
+    provider: options.modelRef?.providerId ?? activeProvider(options).name,
     modelRequested: activeModel(options),
     modelResolved: sample.modelResolved,
     adapterRevision: activeProvider(options).adapterRevision,
     usageRevision: 0,
-    usageFinal: sample.usage !== null,
+    usageFinal: normalized?.inputTotal.value !== null && normalized?.inputTotal.value !== undefined && normalized.outputTotal.value !== null,
     purpose: "primary",
     status: sample.status,
     admittedAt: sample.admittedAt.toISOString(),
@@ -560,7 +629,7 @@ function recordModelUsage(options: LoopOptions, sample: ModelUsageSample): void 
     outputTotal: normalized?.outputTotal ?? unknownQuantity,
     reasoningSubset: normalized?.reasoningSubset ?? null,
   };
-  recordUsageRevision(options.db, sample.attemptId, JSON.stringify(doc));
+  return JSON.stringify(doc);
 }
 
 function settleModelUsage(
@@ -574,7 +643,7 @@ function settleModelUsage(
   finishedAt: Date,
 ): void {
   const usage = response.usage;
-  recordModelUsage(options, {
+  const usageDocument = modelUsageDocument(options, {
     attemptId,
     intentId,
     requestId,
@@ -596,6 +665,7 @@ function settleModelUsage(
       settledCalls: 1,
       settledTokens: 0,
       releaseUnused: false,
+      usageDocument,
     });
     return;
   }
@@ -605,6 +675,9 @@ function settleModelUsage(
     cacheRead: asIntOrNull(usage.cacheReadTokens),
     cacheWrite: asIntOrNull(usage.cacheWriteTokens),
     reasoningSubset: asIntOrNull(usage.reasoningTokens),
+    ...(usage.inclusiveInput === true || usage.inclusiveInput === false
+      ? { inclusiveInput: usage.inclusiveInput }
+      : {}),
     source: `${activeProvider(options).name}/${activeProvider(options).adapterRevision}`,
   });
   const input = normalized.inputTotal.value ?? 0;
@@ -615,14 +688,25 @@ function settleModelUsage(
     summary: `model responded with ${response.toolCalls.length} tool call(s)`,
     detailJson: JSON.stringify({
       usageRevision: 1,
-      usageFinal: true,
+      usageFinal: normalized.inputTotal.value !== null && normalized.outputTotal.value !== null,
       inputTotal: normalized.inputTotal,
       outputTotal: normalized.outputTotal,
       modelResolved: response.modelResolved,
     }),
     settledCalls: 1,
     settledTokens: input + output,
+    releaseUnused: normalized.inputTotal.value !== null && normalized.outputTotal.value !== null,
+    usageDocument,
   });
+}
+
+function estimateReservation(options: LoopOptions, surface: ModelSurface): number {
+  // This is a scheduling estimate, not a provider context or billing bound.
+  // Reserve at most remaining configured authority; actual usage is always
+  // recorded even when the provider exceeds this estimate.
+  const estimate = Buffer.byteLength(surface.system + surface.task + JSON.stringify(options.tools.map((tool) => tool.definition)), "utf8");
+  const budget = snapshotBudget(options);
+  return budget.granted.tokens === null ? estimate : Math.max(0, Math.min(estimate, budget.granted.tokens - budget.settled.tokens - budget.reserved.tokens));
 }
 
 function callTarget(argsJson: string): string | null {
@@ -641,6 +725,11 @@ function stableArgs(argsJson: string): string {
   const parsed = parseToolArgs(argsJson);
   if (!parsed.ok) return argsJson;
   return JSON.stringify(parsed.value);
+}
+
+function renameTargets(argsJson: string): string[] {
+  const parsed = parseToolArgs(argsJson);
+  return parsed.ok && parsed.value["kind"] === "rename" && typeof parsed.value["newPath"] === "string" ? [parsed.value["newPath"]] : [];
 }
 
 function asIntOrNull(value: unknown): number | null {
@@ -665,14 +754,18 @@ export interface AcceptanceCheck {
   reason: string;
 }
 
-function checkAcceptanceEvident(verifiers: Array<() => AcceptanceCheck>): AcceptanceCheck {
+async function checkCompletion(options: LoopOptions, response?: ModelResponse): Promise<AcceptanceCheck> {
+  const pending = options.db.prepare("SELECT COUNT(*) AS n FROM intents WHERE task_id = ? AND state IN ('ADMITTED','CLAIMED','UNKNOWN')").get(options.contract.taskId) as { n: number };
+  if (pending.n > 0) return { complete: false, reason: `${pending.n} unresolved effects require reconciliation` };
+  return checkAcceptanceEvident(options.acceptanceVerifiers ?? [], response);
+}
+
+async function checkAcceptanceEvident(verifiers: NonNullable<LoopOptions["acceptanceVerifiers"]>, response?: ModelResponse): Promise<AcceptanceCheck> {
   // STOP requires evidence tied to acceptance criteria, never bare model
   // text; without a satisfied verifier the loop stalls to ASK.
-  for (const verifier of verifiers) {
-    const check = verifier();
-    if (check.complete) return check;
-  }
-  return { complete: false, reason: "no acceptance evidence recorded" };
+  const checks = await Promise.all(verifiers.map(async (verifier) => verifier(response)));
+  return checks.length === 0 ? { complete: false, reason: "no acceptance evidence recorded" } :
+    checks.find((check) => !check.complete) ?? { complete: true, reason: checks.map((check) => check.reason).join("; ") };
 }
 
 export function snapshotBudget(options: LoopOptions): ReturnType<typeof taskBudgetSnapshot> {

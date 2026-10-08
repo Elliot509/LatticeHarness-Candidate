@@ -7,7 +7,7 @@ import {
   type ActionIntent,
   type AdmissionTicket,
 } from "./admission.js";
-import { BudgetExceededError, BudgetLedger } from "./budget.js";
+import { BudgetLedger, exceedsLimit, type BudgetGrant } from "./budget.js";
 import { guardWrites, throwIfFault } from "./faults.js";
 import type { TaskContract } from "./contract.js";
 
@@ -23,6 +23,10 @@ export interface DurableIntentInput {
   // Logical model request this intent belongs to, when the intent is a
   // cognitive dispatch. Persisted so the usage ledger can group retries.
   requestId?: string | undefined;
+  provider?: string;
+  model?: string;
+  realm?: string;
+  additionalTargets?: readonly string[];
 }
 
 export type DurableDenialReason =
@@ -97,6 +101,8 @@ export interface ReceiptInput {
   // When usage is unknown, the token ceiling stays reserved instead of being
   // released: absence of usage is not zero. A later correction releases it.
   releaseUnused?: boolean;
+  // Usage and receipt share one SQLite commit, including observed overage.
+  usageDocument?: string;
 }
 
 interface ReservationTotals {
@@ -131,8 +137,8 @@ function settledTotals(db: DatabaseSync, taskId: string): ReservationTotals {
 export function taskBudgetSnapshot(
   db: DatabaseSync,
   taskId: string,
-  granted: { calls: number; tokens: number },
-): { granted: { calls: number; tokens: number }; reserved: ReservationTotals; settled: ReservationTotals } {
+  granted: BudgetGrant,
+): { granted: BudgetGrant; reserved: ReservationTotals; settled: ReservationTotals } {
   return {
     granted: { ...granted },
     reserved: openReservationTotals(db, taskId),
@@ -159,7 +165,7 @@ export function admitDurable(
   db: DatabaseSync,
   contract: TaskContract,
   input: DurableIntentInput,
-  granted: { calls: number; tokens: number },
+  granted: BudgetGrant,
   ownerGeneration: number,
   now: Date = new Date(),
   workspaceRootHint?: string,
@@ -172,12 +178,16 @@ export function admitDurable(
     authorityRevision: input.authorityRevision,
     maxCalls: input.maxCalls,
     maxTokens: input.maxTokens,
+    ...(input.provider === undefined ? {} : { provider: input.provider }),
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.realm === undefined ? {} : { realm: input.realm }),
+    ...(input.additionalTargets === undefined ? {} : { additionalTargets: input.additionalTargets }),
   };
   const reserved = openReservationTotals(db, input.taskId);
   const settled = settledTotals(db, input.taskId);
   if (
-    settled.calls + reserved.calls + input.maxCalls > granted.calls ||
-    settled.tokens + reserved.tokens + input.maxTokens > granted.tokens
+    exceedsLimit(settled.calls + reserved.calls + input.maxCalls, granted.calls) ||
+    exceedsLimit(settled.tokens + reserved.tokens + input.maxTokens, granted.tokens)
   ) {
     return {
       admitted: false,
@@ -300,7 +310,7 @@ function workspaceRootFor(db: DatabaseSync, contract: TaskContract, taskId: stri
 }
 
 function ledgerWithPersistedTotals(
-  granted: { calls: number; tokens: number },
+  granted: BudgetGrant,
   settled: ReservationTotals,
   reserved: ReservationTotals,
 ): BudgetLedger {
@@ -344,8 +354,8 @@ export function claimDurable(
   if (row.state !== "ADMITTED") return { claimed: false, reason: "already-claimed" };
   const ticket = JSON.parse(row.ticket) as AdmissionTicket;
   const intent = db
-    .prepare("SELECT operation, target FROM intents WHERE intent_id = ?")
-    .get(row.intent_id) as { operation: string; target: string | null } | undefined;
+    .prepare("SELECT task_id, operation, target FROM intents WHERE intent_id = ?")
+    .get(row.intent_id) as { task_id: string; operation: string; target: string | null } | undefined;
   if (intent === undefined) return { claimed: false, reason: "not-found" };
   // WITHOUT an explicit contract the claim still revalidates generation and
   // revision against the persisted ticket (legacy path); WITH a contract it
@@ -360,7 +370,10 @@ export function claimDurable(
       contract: revalidation.contract,
       operation: intent.operation,
       target: intent.target,
-      workspaceRoot: workspaceRootFor(db, revalidation.contract, row.intent_id),
+      workspaceRoot: ticket.workspaceRoot ?? workspaceRootFor(db, revalidation.contract, intent.task_id),
+      ...(ticket.provider === undefined ? {} : { provider: ticket.provider }),
+      ...(ticket.model === undefined ? {} : { model: ticket.model }),
+      ...(ticket.realm === undefined ? {} : { realm: ticket.realm }),
       now: revalidation.now,
     });
     if (!result.claimed) {
@@ -427,6 +440,10 @@ export function invalidateAdmittedIntent(db: DatabaseSync, intentId: string): bo
 // idempotently per attempt and closes the attempt in one transaction.
 // UNKNOWN keeps the attempt pending reconciliation; it never replays blind.
 export function recordReceiptDurable(db: DatabaseSync, input: ReceiptInput, now: Date = new Date()): void {
+  if (!Number.isSafeInteger(input.settledCalls) || input.settledCalls < 0 ||
+      !Number.isSafeInteger(input.settledTokens) || input.settledTokens < 0) {
+    throw new Error("Observed settlement must contain non-negative safe integers");
+  }
   const row = db
     .prepare("SELECT intent_id, state FROM attempts WHERE attempt_id = ?")
     .get(input.attemptId) as { intent_id: string; state: string } | undefined;
@@ -467,12 +484,12 @@ export function recordReceiptDurable(db: DatabaseSync, input: ReceiptInput, now:
     }
     const openCalls = reservation.calls - reservation.settled_calls;
     const openTokens = reservation.tokens - reservation.settled_tokens;
-    if (input.settledCalls > openCalls || input.settledTokens > openTokens) {
-      throw new BudgetExceededError("settlement exceeding reservation");
-    }
-    const releaseUnused = input.releaseUnused ?? true;
-    const releasedCalls = releaseUnused ? openCalls - input.settledCalls : 0;
-    const releasedTokens = releaseUnused ? openTokens - input.settledTokens : 0;
+    // An estimate cannot veto already observed consumption. Increasing the
+    // reservation to actual usage records overage, never grants new authority.
+    // Admission will refuse further work if the persisted hard cap is exceeded.
+    const releaseUnused = input.releaseUnused ?? input.outcome !== "unknown";
+    const releasedCalls = releaseUnused ? openCalls - input.settledCalls : Math.min(0, openCalls - input.settledCalls);
+    const releasedTokens = releaseUnused ? openTokens - input.settledTokens : -input.settledTokens;
     db.prepare(
       `UPDATE reservations SET calls = calls - ?, tokens = tokens - ?,
         settled_calls = settled_calls + ?, settled_tokens = settled_tokens + ?
@@ -490,6 +507,7 @@ export function recordReceiptDurable(db: DatabaseSync, input: ReceiptInput, now:
       input.outcome === "unknown" ? "UNKNOWN" : "RESOLVED",
       row.intent_id,
     );
+    if (input.usageDocument !== undefined) recordUsageRevision(db, input.attemptId, input.usageDocument, now);
     db.exec("COMMIT");
   } catch (error) {
     try {

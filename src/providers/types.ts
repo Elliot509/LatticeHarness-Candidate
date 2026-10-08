@@ -3,6 +3,7 @@ export interface ToolParameterSchema {
   properties: Record<string, unknown>;
   required?: string[];
   additionalProperties?: boolean;
+  oneOf?: Array<Record<string, unknown>>;
 }
 
 export interface ToolDefinition {
@@ -30,6 +31,15 @@ export interface RawUsage {
   cacheReadTokens?: unknown;
   cacheWriteTokens?: unknown;
   reasoningTokens?: unknown;
+  // Declared by the provider boundary when the wire response carries enough
+  // evidence to fix the Lattice input partition convention (TELEMETRY §3):
+  //   inputTotal = inputNew + cacheRead + cacheWrite   (disjoint)
+  // `true`  = provider's input field already includes the cache partitions
+  //           (OpenAI prompt_tokens and OpenRouter prompt_tokens semantics);
+  // `false` = provider's input field is already exclusive of them;
+  // absent  = convention unknown; telemetry keeps partitions UNKNOWN and
+  //           downstream consumers must refuse the window (never zero-filled).
+  inclusiveInput?: boolean | undefined;
   [key: string]: unknown;
 }
 

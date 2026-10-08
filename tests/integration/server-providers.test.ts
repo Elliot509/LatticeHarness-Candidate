@@ -65,10 +65,9 @@ async function serve(db: unknown, workspace: string, dataDir?: string) {
 }
 
 async function authed(url: string) {
-  const home = await fetch(`${url}/`);
-  const cookie = home.headers.get("set-cookie")?.split(";")[0] ?? "";
-  await home.arrayBuffer().catch(() => undefined);
-  return cookie;
+  const server = servers.find((entry) => entry.url === url);
+  if (server === undefined) throw new Error("fixture server missing");
+  return server.bootstrapCookie;
 }
 
 function postCommand(url: string, cookie: string, body: Record<string, unknown>) {
@@ -138,6 +137,8 @@ describe("provider presets on the core", () => {
       payload: { workspace: "", objective: "o", provider: "openrouter", model: "m", baseUrl: "http://127.0.0.1:9" },
     });
     if (!created.accepted || created.taskId === "") throw new Error("create denied");
+    expect(tasks.snapshot(created.taskId).keyConfigured).toBe(false);
+    tasks.setKey("openrouter", "k", "http://127.0.0.1:9");
     expect(tasks.snapshot(created.taskId).keyConfigured).toBe(true);
   });
 
@@ -248,7 +249,7 @@ describe("provider HTTP surfaces", () => {
     expect(listed.models.map((model) => model.id)).toEqual(["m1", "m2"]);
     expect(JSON.stringify(listed)).not.toContain("Authorization");
 
-    await postCommand(server.url, cookie, { commandId: "k3", kind: "set-key", payload: { provider: "custom", key: "test-key" } });    await fetch(`${server.url}/api/providers/models`, {
+    await postCommand(server.url, cookie, { commandId: "k3", kind: "set-key", payload: { provider: "custom", baseUrl: fixture.url, key: "test-key" } });    await fetch(`${server.url}/api/providers/models`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: cookie, Origin: server.url },
       body: JSON.stringify({ providerId: "custom", baseUrl: fixture.url }),

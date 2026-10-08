@@ -19,6 +19,7 @@ import { HandleWaiter } from "../runtime/wait.js";
 import { runTaskLoop, type LoopOptions } from "../runtime/loop.js";
 import { claimOwnership, openLatticeDb } from "../storage/db.js";
 import { VerifyLedger } from "../runtime/verify.js";
+import { TaskAcceptance, defaultAcceptance } from "../runtime/acceptance.js";
 import { FakeProvider, type FakeScriptStep } from "../providers/fake.js";
 import { OpenAiAdapter } from "../providers/openai.js";
 import { isKnownProviderId } from "../providers/presets.js";
@@ -39,6 +40,9 @@ export interface RunCommandOptions {
   verifyExecutable?: string;
   verifyArgs?: string[];
   maxIterations?: number;
+  maxModelAttempts?: number;
+  maxTotalTokens?: number;
+  taskExpiryMs?: number;
   onOutput?: (line: string) => void;
   // Continues a persisted task instead of creating one: the contract,
   // session, budget and composition all come from the ledger.
@@ -97,7 +101,8 @@ export async function runTaskCommand(options: RunCommandOptions): Promise<number
     emit(`lattice: workspace does not exist: ${workspace}`);
     return 1;
   }
-  const config = loadConfig({ workspace, dataDir: path.resolve(options.dataDir) }, process.cwd());
+  const config = loadConfig({ workspace, dataDir: path.resolve(options.dataDir),
+    maxModelAttempts: options.maxModelAttempts, maxTotalTokens: options.maxTotalTokens, taskExpiryMs: options.taskExpiryMs }, process.cwd());
   const configErrors = validateConfig(config);
   if (configErrors.length > 0) {
     emit(`lattice: invalid configuration: ${configErrors.join("; ")}`);
@@ -136,13 +141,13 @@ interface ResolvedTarget {
 function resolveTaskTarget(
   db: ReturnType<typeof openLatticeDb>["raw"],
   options: RunCommandOptions,
-  config: { maxModelAttempts: number; maxTotalTokens: number; taskExpiryMs: number; commandTimeoutMs: number },
+  config: { maxModelAttempts: number | null; maxTotalTokens: number | null; taskExpiryMs: number | null; commandTimeoutMs: number },
   workspace: string,
   ownerGeneration: number,
   emit: (line: string) => void,
 ): ResolvedTarget | null {
   if (options.resumeTaskId === undefined) {
-    const acceptance = options.acceptance.length > 0 ? options.acceptance : ["task completed as verified"];
+    const acceptance = options.acceptance.length > 0 ? options.acceptance : defaultAcceptance(options.task);
     const contract = createContract({
       taskId: `task-${randomUUID()}`,
       rootId: `root-${randomUUID()}`,
@@ -163,7 +168,7 @@ function resolveTaskTarget(
       realm: "local-trusted",
       allowedProvider: options.providerName,
       allowedModel: options.model,
-      expiresAt: new Date(Date.now() + config.taskExpiryMs).toISOString(),
+      expiresAt: config.taskExpiryMs === null ? null : new Date(Date.now() + config.taskExpiryMs).toISOString(),
       retentionPolicy: "retain until explicit deletion",
       origin: "cli run",
     });
@@ -283,6 +288,7 @@ async function runResolvedLoop(
       },
       contract.obligations[0] ?? "complete the task",
     );
+    const acceptance = new TaskAcceptance(workspace, contract.acceptanceCriteria);
     const loopOptions: LoopOptions = {
       db: dbRaw,
       provider,
@@ -314,13 +320,20 @@ async function runResolvedLoop(
                 },
               ]
             : [],
-      }),
+      }).map(tool => ({ ...tool, run: async (argsJson, context) => {
+        await acceptance.prepare(tool.name, context.signal);
+        const out = await tool.run(argsJson, context);
+        await acceptance.observe(tool.name, argsJson, out.result);
+        return out;
+      } })),
       toolContext: { workspaceRoot: workspace, realm: "local-trusted", timeoutMs: config.commandTimeoutMs },
       ownerGeneration,
       grantedCalls: granted.calls,
       grantedTokens: granted.tokens,
-      maxIterations: options.maxIterations ?? 25,
-      acceptanceVerifiers: [() => ledger.check()],
+      ...(options.maxIterations === undefined ? {} : { maxIterations: options.maxIterations }),
+      acceptanceVerifiers: [(response) => acceptance.check(response?.text), ...(options.verifyExecutable === undefined ? [] : [() => ledger.check()])],
+      verifyAfterTools: acceptance.hasFilesystemPredicate,
+      modelRef: { provider, providerId: resolved.providerName, model: resolved.model, endpoint: resolved.baseUrl ?? null },
       waiter,
       onEvent: (event) => {
         if (event.kind === "tool-start") emit(`[tool] ${event.tool} started`);

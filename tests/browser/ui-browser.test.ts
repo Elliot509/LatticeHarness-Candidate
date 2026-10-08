@@ -139,7 +139,7 @@ describe("browser ui", () => {
       ],
       prohibitions: ["publish"],
       realm: "local-trusted",
-      allowedProvider: "openai",
+      allowedProvider: "fake",
       allowedModel: "m1",
       expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       retentionPolicy: "retain until explicit deletion",
@@ -185,7 +185,7 @@ describe("browser ui", () => {
       acceptanceVerifiers: [() => ledger.check()],
     });
     await supervisor.close();
-    expect(stop.decision).toBe("STOP");
+    expect(stop.decision, stop.reason).toBe("STOP");
 
     const server = await serveLattice({
       db: opened.raw,
@@ -231,7 +231,7 @@ describe("browser ui", () => {
         })()`,
         returnByValue: true,
       });
-      expect(landingGeometry.result.value).toEqual({ sidebarWidth: 264, composerWidth: 760, centeredDelta: 0, noLandingTopbar: true });
+      expect(landingGeometry.result.value).toEqual({ sidebarWidth: 236, composerWidth: 760, centeredDelta: 0, noLandingTopbar: true });
       await screenshot(session, path.join(dir, "landing-1440.png"));
 
       await session.send("Runtime.evaluate", { expression: `document.querySelector(".newtaskbtn")?.click()` });

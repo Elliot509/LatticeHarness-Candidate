@@ -30,6 +30,7 @@ async function input(session: CdpSession, label: string, value: string): Promise
 }
 
 async function click(session: CdpSession, text: string, scope = ""): Promise<void> {
+  await waitFor(session, `[...document.querySelectorAll(${JSON.stringify(`${scope} button`)})].some(button => button.textContent.trim() === ${JSON.stringify(text)} && !button.disabled)`);
   await evaluate(session, `[...document.querySelectorAll(${JSON.stringify(`${scope} button`)})].find((button) => button.textContent.trim() === ${JSON.stringify(text)})?.click()`);
 }
 
@@ -87,6 +88,13 @@ describe("provider master-detail and operational help", () => {
       await waitFor(session, `document.querySelector('.credential-state')?.textContent === 'Configurada · sessão'`);
       expect(await evaluate(session, `document.querySelector('input[type=password]').value`)).toBe("");
       await input(session, "Endpoint do provider", `${base}/v1`);
+      await click(session, "Testar conexão", ".provider-detail");
+      await waitFor(session, `document.querySelector('.provider-feedback.success') !== null`);
+      expect(observed.at(-1)?.auth).toBeUndefined();
+      await waitFor(session, `document.querySelector('.credential-state').textContent === 'Não configurada'`);
+      await input(session, "Chave de API OpenAI", "fixture-key-1");
+      await click(session, "Salvar chave", ".provider-detail");
+      await waitFor(session, `document.querySelector('.credential-state').textContent === 'Configurada · sessão'`);
       await click(session, "Testar conexão", ".provider-detail");
       await waitFor(session, `document.querySelector('.provider-feedback.success') !== null`);
       expect(observed.at(-1)?.auth).toBe("Bearer fixture-key-1");

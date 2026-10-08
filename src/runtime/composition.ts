@@ -23,6 +23,7 @@ export interface Composition {
   toolSurfaceDigest: string;
   adapterRevision: string;
   surfaceVersion: string;
+  endpoint?: string | null;
 }
 
 export interface CompositionEpoch {
@@ -93,8 +94,9 @@ export function compositionForRoute(
   tools: readonly ToolDefinition[],
   adapterRevision: string = OPENAI_ADAPTER_REVISION,
   surfaceVersion: string = SURFACE_VERSION,
+  endpoint?: string | null,
 ): Composition {
-  return { provider, model, toolSurfaceDigest: toolSurfaceDigest(tools), adapterRevision, surfaceVersion };
+  return { provider, model, toolSurfaceDigest: toolSurfaceDigest(tools), adapterRevision, surfaceVersion, ...(endpoint === undefined ? {} : { endpoint }) };
 }
 
 // RequestBinding: what exactly was sent under which composition and which
@@ -112,6 +114,7 @@ export interface RequestBinding {
   toolSurfaceDigest: string;
   ledgerCut: number;
   payloadDigest: string;
+  endpoint: string | null;
 }
 
 function canonicalPayload(request: ModelRequest): string {
@@ -168,5 +171,6 @@ export function bindRequest(input: {
     toolSurfaceDigest: input.epoch.composition.toolSurfaceDigest,
     ledgerCut: ledgerCutOf(input.db),
     payloadDigest: payloadDigest(input.request),
+    endpoint: input.epoch.composition.endpoint ?? null,
   };
 }

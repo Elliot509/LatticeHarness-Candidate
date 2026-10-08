@@ -41,9 +41,9 @@ export function parseTapCounts(output: string): TestCounts | null {
       failed += 1;
       seen = true;
     } else if (/^ok\b/.test(trimmed)) {
-      passed += 1;
       seen = true;
       if (/#\s*skip\b/i.test(trimmed)) skipped += 1;
+      else passed += 1;
     }
   }
   return seen ? { passed, failed, skipped } : null;
@@ -140,7 +140,7 @@ export class VerifyLedger {
         reason: `verification failing: exit ${this.latest.exitCode}, failed=${this.latest.failed ?? "unknown"}`,
       };
     }
-    if (!this.latest.countsKnown) {
+    if (!this.latest.countsKnown || (this.latest.passed ?? 0) < 1) {
       return {
         complete: false,
         reason: `verification exited 0 but test counts unknown; refusing to conclude from exit code alone`,

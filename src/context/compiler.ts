@@ -79,27 +79,21 @@ export function compileSurface(
       limits.maxChars,
     );
   }
-  let used = estimateChars(KERNEL) + estimateChars(anchors);
+  const prefix = `${anchors}\n\nEvidência:\n`;
+  const note = evidence.length > 0 ? "\n\n(itens omitidos por limite quando necessário; histórico durável preservado, sem resumo semântico.)" : "";
+  let used = KERNEL.length + prefix.length + note.length;
   const included: EvidenceItem[] = [];
   const omitted: EvidenceItem[] = [];
-  for (const item of evidence) {
-    const cost = estimateChars(item.id) + estimateChars(item.text) + 16;
-    if (used + cost <= limits.maxChars) {
-      included.push(item);
-      used += cost;
-    } else {
-      omitted.push(item);
-    }
+  // Most recent observations win. Older durable receipts stay outside the
+  // request; the omission notice itself is bounded and never lists all IDs.
+  for (const item of [...evidence].reverse()) {
+    const cost = item.id.length + item.text.length + 4;
+    if (used + cost <= limits.maxChars) { included.unshift(item); used += cost; }
+    else omitted.unshift(item);
   }
-  const evidenceText =
-    included.length > 0
-      ? included.map((item) => `[${item.id}] ${item.text}`).join("\n")
-      : "(sem evidência adicional)";
-  const taskText =
-    `${anchors}\n\nEvidência:\n${evidenceText}` +
-    (omitted.length > 0
-      ? `\n\n(${omitted.length} itens de evidência omitidos por limite: ${omitted.map((item) => item.id).join(", ")}. Recupere-os por handles antes de concluir.)`
-      : "");
+  let taskText = prefix + included.map((item) => `[${item.id}] ${item.text}`).join("\n");
+  if (omitted.length > 0) taskText += note;
+  if (KERNEL.length + taskText.length > limits.maxChars) throw new ContextOverflowError(KERNEL.length + taskText.length, limits.maxChars);
   return {
     surfaceVersion: SURFACE_VERSION,
     system: KERNEL,

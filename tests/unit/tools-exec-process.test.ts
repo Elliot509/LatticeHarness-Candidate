@@ -65,13 +65,32 @@ describe("exec tool", () => {
   it("rejects spawn failures, escapes and bad timeouts", async () => {
     const ctx = context();
     const tool = new ExecTool();
-    expect((await tool.execute({ executable: "lattice-no-such-binary-xyz" }, ctx)).errorKind).toBe("spawn-failed");
+    expect((await tool.execute({ executable: "lattice-no-such-binary-xyz", argv: [] }, ctx)).errorKind).toBe("spawn-failed");
     expect((await tool.execute({ executable: NODE, cwd: ".." }, ctx)).errorKind).toBe("invalid-args");
     expect((await tool.execute({ executable: NODE, timeoutMs: -1 }, ctx)).errorKind).toBe("invalid-args");
   });
 });
 
 describe("process supervisor", () => {
+  it("observes without consuming output and keeps poll-after-exit/double-stop coherent", async () => {
+    const ctx = context();
+    const supervisor = new ProcessSupervisor(ctx.workspaceRoot);
+    try {
+      const spawned = await supervisor.execute({ op: "spawn", executable: NODE, argv: ["-e", "console.log('retained-out'); console.error('retained-err'); setTimeout(() => console.log('last-out'), 150)"], generation: 1, realm: "local-trusted", attemptId: "a1" });
+      const handle = spawned.handleId ?? "";
+      await supervisor.waitForExit(handle, 1, AbortSignal.timeout(3000));
+      expect(supervisor.observe(handle, 1)).toMatchObject({ status: "completed", complete: true });
+      expect(supervisor.observe(handle, 1).detail).toContain("retained-err");
+      const first = await supervisor.execute({ op: "poll", handle, generation: 1, timeoutMs: 0 });
+      expect(first.detail).toContain("retained-out");
+      expect(first.detail).toContain("last-out");
+      expect((await supervisor.execute({ op: "poll", handle, generation: 1, timeoutMs: 0 })).detail).not.toContain("retained-out");
+      const stopped = await supervisor.execute({ op: "stop", handle, generation: 1 });
+      expect(stopped).toMatchObject({ status: "completed", complete: true });
+      expect(await supervisor.execute({ op: "stop", handle, generation: 1 })).toEqual(stopped);
+    } finally { await supervisor.close(); }
+  });
+
   it("spawns, polls output and observes exit", async () => {
     const ctx = context();
     const supervisor = new ProcessSupervisor(ctx.workspaceRoot);
@@ -170,7 +189,7 @@ describe("process supervisor", () => {
 
 describe("verification", () => {
   it("parses TAP counts and refuses to invent them", () => {
-    expect(parseTapCounts("ok 1 - a\nnot ok 2 - b\nok 3 - c # SKIP reason\n")).toEqual({ passed: 2, failed: 1, skipped: 1 });
+    expect(parseTapCounts("ok 1 - a\nnot ok 2 - b\nok 3 - c # SKIP reason\n")).toEqual({ passed: 1, failed: 1, skipped: 1 });
     expect(parseTapCounts("some unstructured log")).toBeNull();
   });
 
@@ -202,5 +221,18 @@ describe("verification", () => {
       outputTail: "", durationMs: 1,
     });
     expect(ledger.check().complete).toBe(false);
+  });
+
+  it("distinguishes all skipped from one passing and one skipped test in both reporters", async () => {
+    for (const output of ["ok 1 - a # SKIP", "ℹ pass 0\nℹ fail 0\nℹ skipped 1"]) {
+      const ledger = new VerifyLedger();
+      ledger.record(await runVerify({ executable: NODE, argv: ["-e", `console.log(${JSON.stringify(output)})`] }, context()));
+      expect(ledger.check().complete).toBe(false);
+    }
+    for (const output of ["ok 1 - a\nok 2 - b # SKIP", "ℹ pass 1\nℹ fail 0\nℹ skipped 1"]) {
+      const ledger = new VerifyLedger();
+      ledger.record(await runVerify({ executable: NODE, argv: ["-e", `console.log(${JSON.stringify(output)})`] }, context()));
+      expect(ledger.check().complete).toBe(true);
+    }
   });
 });

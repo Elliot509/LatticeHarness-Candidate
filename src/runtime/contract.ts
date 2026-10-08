@@ -1,3 +1,5 @@
+import { validLimit } from "./budget.js";
+
 export interface Grant {
   subject: string;
   operations: readonly string[];
@@ -5,8 +7,8 @@ export interface Grant {
   provider?: string | undefined;
   expiresAt: string | null;
   limits: {
-    maxCalls: number;
-    maxTokens: number;
+    maxCalls: number | null;
+    maxTokens: number | null;
   };
 }
 
@@ -35,7 +37,7 @@ export interface TaskContract {
   realm: string;
   allowedProvider: string | null;
   allowedModel: string | null;
-  expiresAt: string;
+  expiresAt: string | null;
   retentionPolicy: string;
   origin: string;
 }
@@ -61,7 +63,7 @@ export function validateContract(contract: ContractInput): string[] {
   }
   if (contract.obligations.length === 0) errors.push("obligations must list at least one entry");
   if (!nonEmpty(contract.realm)) errors.push("realm must be non-empty");
-  if (!validDate(contract.expiresAt)) errors.push("expiresAt must be a valid timestamp");
+  if (contract.expiresAt !== null && !validDate(contract.expiresAt)) errors.push("expiresAt must be null or a valid timestamp");
   if (!nonEmpty(contract.retentionPolicy)) errors.push("retentionPolicy must be non-empty");
   if (!nonEmpty(contract.origin)) errors.push("origin must record the source of each decision");
   if (contract.revision !== undefined && (!Number.isInteger(contract.revision) || contract.revision < 1)) {
@@ -73,10 +75,10 @@ export function validateContract(contract: ContractInput): string[] {
     if (grant.expiresAt !== null && !validDate(grant.expiresAt)) {
       errors.push(`grants[${index}].expiresAt must be null or a valid timestamp`);
     }
-    if (!Number.isInteger(grant.limits.maxCalls) || grant.limits.maxCalls <= 0) {
+    if (!validLimit(grant.limits.maxCalls)) {
       errors.push(`grants[${index}].limits.maxCalls must be a positive integer`);
     }
-    if (!Number.isInteger(grant.limits.maxTokens) || grant.limits.maxTokens <= 0) {
+    if (!validLimit(grant.limits.maxTokens)) {
       errors.push(`grants[${index}].limits.maxTokens must be a positive integer`);
     }
   }
@@ -105,7 +107,7 @@ export function reviseContract(
 }
 
 export function isContractExpired(contract: TaskContract, now: Date = new Date()): boolean {
-  return Date.parse(contract.expiresAt) <= now.getTime();
+  return contract.expiresAt !== null && Date.parse(contract.expiresAt) <= now.getTime();
 }
 
 export function findGrant(contract: TaskContract, operation: string, now: Date = new Date()): Grant | null {

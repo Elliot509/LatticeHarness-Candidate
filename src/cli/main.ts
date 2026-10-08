@@ -62,7 +62,10 @@ function printHelp(): void {
     "  --verify <exe>      verification executable (run command)",
     "  --verify-arg <a>    verification argument, repeatable (run command)",
     "  --accept <text>     acceptance criterion, repeatable (run command)",
-    "  --max-iterations N  loop iteration budget (run command)",
+    "  --max-iterations N  explicit loop iteration limit (unset: none)",
+    "  --max-calls N       explicit cumulative model-call limit (unset: none)",
+    "  --max-tokens N      explicit cumulative token limit (unset: none)",
+    "  --task-timeout-ms N explicit contract duration (unset: none)",
     "  --port <n>          loopback port for lattice ui (default: ephemeral)",
     "  --no-open           do not open a browser automatically (ui command)",
     "  --help              show this help",
@@ -112,6 +115,9 @@ interface RunOptions {
   verifyArgs: string[];
   acceptance: string[];
   maxIterations?: number | undefined;
+  maxModelAttempts?: number | undefined;
+  maxTotalTokens?: number | undefined;
+  taskExpiryMs?: number | undefined;
   resumeTaskId?: string | undefined;
 }
 
@@ -182,6 +188,9 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
   const verifyArgs: string[] = [];
   const acceptance: string[] = [];
   let maxIterations: number | undefined;
+  let maxModelAttempts: number | undefined;
+  let maxTotalTokens: number | undefined;
+  let taskExpiryMs: number | undefined;
   let resumeTaskId: string | undefined;
   let sessionId: string | undefined;
   let out: string | undefined;
@@ -254,6 +263,13 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
     } else if (arg === "--accept") {
       acceptance.push(takeValue(argv, i + 1, arg));
       i += 1;
+    } else if (arg === "--max-calls" || arg === "--max-tokens" || arg === "--task-timeout-ms") {
+      const parsed = Number(takeValue(argv, i + 1, arg));
+      i += 1;
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) fail(`${arg} must be a positive integer`);
+      if (arg === "--max-calls") maxModelAttempts = parsed;
+      else if (arg === "--max-tokens") maxTotalTokens = parsed;
+      else taskExpiryMs = parsed;
     } else if (arg === "--max-iterations") {
       const raw = takeValue(argv, i + 1, arg);
       i += 1;
@@ -321,6 +337,7 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
         verifyArgs,
         acceptance,
         maxIterations,
+        maxModelAttempts, maxTotalTokens, taskExpiryMs,
         resumeTaskId,
       };
     }
@@ -339,6 +356,7 @@ function parseArgs(argv: readonly string[]): StatusOptions | RunOptions | UiOpti
       verifyArgs,
       acceptance,
       maxIterations,
+      maxModelAttempts, maxTotalTokens, taskExpiryMs,
     };
   }
   if (command === "sessions") {
@@ -480,6 +498,9 @@ export function main(argv: readonly string[] = process.argv.slice(2)): void {
       ...(options.verifyExecutable !== undefined ? { verifyExecutable: options.verifyExecutable } : {}),
       verifyArgs: options.verifyArgs,
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
+      ...(options.maxModelAttempts === undefined ? {} : { maxModelAttempts: options.maxModelAttempts }),
+      ...(options.maxTotalTokens === undefined ? {} : { maxTotalTokens: options.maxTotalTokens }),
+      ...(options.taskExpiryMs === undefined ? {} : { taskExpiryMs: options.taskExpiryMs }),
       ...(options.resumeTaskId !== undefined ? { resumeTaskId: options.resumeTaskId } : {}),
     })
       .then((code) => process.exit(code))

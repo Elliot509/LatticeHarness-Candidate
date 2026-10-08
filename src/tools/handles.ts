@@ -18,7 +18,8 @@ export class HandleRegistry {
 
   store(kind: string, summary: string, expand: () => string): string {
     if (this.handles.size >= this.maxHandles) {
-      throw new Error("Handle registry full; expand or drop an existing handle first");
+      const oldest = this.handles.keys().next().value;
+      if (oldest !== undefined) this.handles.delete(oldest);
     }
     const id = `h_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
     this.handles.set(id, {

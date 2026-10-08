@@ -164,7 +164,7 @@ describe("browser ui state presentation", () => {
         });
         expect(stateView.result.value).toEqual({
           hasReason: true,
-          hasStop: state === "RUNNING",
+          hasStop: state === "RUNNING" || state === "WAITING",
           hasResume: state === "WAITING" || state === "BLOCKED" || state === "CANCELLED",
           noHorizontalScroll: true,
         });

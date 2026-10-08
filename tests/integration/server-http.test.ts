@@ -43,8 +43,7 @@ async function serve() {
   claimOwnership(opened.raw);
   const server = await serveLattice({ db: opened.raw, workspace, assetRoot: assets });
   servers.push(server);
-  const home = await fetch(`${server.url}/`);
-  const cookie = home.headers.get("set-cookie")?.split(";")[0] ?? "";
+  const cookie = server.bootstrapCookie;
   return { server, cookie, workspace };
 }
 
@@ -79,9 +78,20 @@ function post(url: string, cookie: string, body: Record<string, unknown>, origin
 }
 
 describe("server http boundary", () => {
+  it("rejects cross-port origins on reads and bootstrap requests without owner authentication", async () => {
+    const { server, cookie } = await serve();
+    expect((await fetch(`${server.url}/`)).status).toBe(401);
+    expect((await fetch(`${server.url}/`, { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": "iframe" } })).status).toBe(401);
+    const otherPort = `http://127.0.0.1:${server.port === 65535 ? 65534 : server.port + 1}`;
+    expect((await fetch(`${server.url}/api/sessions`, { headers: { Cookie: cookie, Origin: otherPort } })).status).toBe(403);
+    expect((await rawStatus(server.port, `127.0.0.1:${server.port + 1}`)).status).toBe(400);
+    const allowed = await fetch(`${server.url}/`, { headers: { Cookie: cookie } });
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+  });
   it("serves the app and requires a session for the api", async () => {
     const { server, cookie } = await serve();
-    const home = await fetch(`${server.url}/`);
+    const home = await fetch(`${server.url}/`, { headers: { Cookie: cookie } });
     expect(home.status).toBe(200);
     const denied = await fetch(`${server.url}/api/sessions`);
     expect(denied.status).toBe(401);
@@ -96,7 +106,7 @@ describe("server http boundary", () => {
     const { server, cookie } = await serve();
     const badHost = await rawStatus(server.port, "evil.example");
     expect(badHost.status).toBe(400);
-    const goodHost = await rawStatus(server.port, "127.0.0.1");
+    const goodHost = await rawStatus(server.port, `127.0.0.1:${server.port}`);
     expect(goodHost.status).toBe(401);
     const badOrigin = await post(`${server.url}/api/commands`, cookie, { commandId: "x", kind: "stop" }, "https://evil.example");
     expect(badOrigin.status).toBe(403);

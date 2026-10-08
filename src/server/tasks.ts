@@ -1,23 +1,29 @@
+import { throwIfFault } from "../runtime/faults.js";
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import { normalizeEndpoint, requireCredentialTransport } from "../providers/endpoint.js";
 import { createContract, reviseContract, type TaskContract } from "../runtime/contract.js";
 import {
   evaluateResumeGate,
   grantedFromContract,
   openRun,
   openSession,
+  recordTaskEvent,
   resumeTask as resumeTaskInDb,
   unknownHistory,
 } from "../runtime/continuity.js";
-import { HandleWaiter, edgeWakeId, levelWakeId, listActiveWaits, recordWake } from "../runtime/wait.js";
+import { HandleWaiter, edgeWakeId, levelWakeId, listActiveWaits, recordWake, notePendingRevision, takePendingRevisions } from "../runtime/wait.js";
 import { advanceCompositionEpoch, compositionForRoute } from "../runtime/composition.js";
 import { taskBudgetSnapshot } from "../runtime/effects.js";
+import type { BudgetGrant } from "../runtime/budget.js";
 import { runTaskLoop, type LoopOptions, type LoopStop } from "../runtime/loop.js";
 import { buildToolset } from "../tools/registry.js";
 import { ProcessSupervisor } from "../tools/process.js";
-import { VerifyLedger, summarizeExecResult } from "../runtime/verify.js";
+import { summarizeExecResult } from "../runtime/verify.js";
+import { TaskAcceptance, defaultAcceptance } from "../runtime/acceptance.js";
 import { OpenAiAdapter } from "../providers/openai.js";
 import { findPreset, isKnownProviderId } from "../providers/presets.js";
 import { resolveInScope } from "../platform/paths.js";
@@ -47,6 +53,8 @@ export interface LiveRun {
   pendingSteerings: Map<string, number>;
   pendingModel: { provider: string; model: string; baseUrl: string | null } | null;
   stopRequested: boolean;
+  supervisor: ProcessSupervisor;
+  waitAbort: AbortController | null;
 }
 
 export interface ServerTaskOptions {
@@ -56,6 +64,8 @@ export interface ServerTaskOptions {
   provider: string;
   model: string;
   baseUrl: string | null;
+  budget?: BudgetGrant;
+  expiresAt?: string | null;
 }
 
 interface StoredSteering {
@@ -80,20 +90,25 @@ export class TaskManager {
   private readonly contracts = new Map<string, TaskContract>();
   private readonly subscribers = new Map<string, Set<(event: UiEvent) => void>>();
   private readonly db: DatabaseSync;
-  readonly serverWorkspace: string;
-  private readonly defaultGrants: { calls: number; tokens: number };
+  private currentWorkspace: string;
+  private readonly defaultGrants: { calls: number | null; tokens: number | null };
   private readonly productDir: string | null;
+  private draining = false;
+  private closing: Promise<void> | null = null;
+  private readonly nativeProjectSelection: boolean;
 
   constructor(
     db: DatabaseSync,
     serverWorkspace: string,
-    defaultGrants: { calls: number; tokens: number } = { calls: 50, tokens: 200_000 },
+    defaultGrants: { calls: number | null; tokens: number | null } = { calls: null, tokens: null },
     productDir: string | null = null,
+    nativeProjectSelection = false,
   ) {
     this.db = db;
-    this.serverWorkspace = serverWorkspace;
+    this.currentWorkspace = serverWorkspace;
     this.defaultGrants = defaultGrants;
     this.productDir = productDir;
+    this.nativeProjectSelection = nativeProjectSelection;
   }
 
   /** Device-global product config directory, or null when not configured. */
@@ -101,10 +116,36 @@ export class TaskManager {
     return this.productDir;
   }
 
+  get serverWorkspace(): string { return this.currentWorkspace; }
+
+  // Only the private desktop parent channel may establish a new root.
+  selectNativeWorkspace(selected: string): string {
+    if (!this.nativeProjectSelection || this.draining || this.live.size !== 0) throw new Error("project selection is unavailable while a task is active");
+    const root = fs.realpathSync.native(selected);
+    if (!fs.statSync(root).isDirectory()) throw new Error("choose an existing project directory");
+    if (root === path.parse(root).root || root === fs.realpathSync.native(os.homedir())) throw new Error("choose a project folder inside your home or drive");
+    this.currentWorkspace = root;
+    return root;
+  }
+
+  get activeTaskCount(): number { return this.live.size; }
+
+  close(): Promise<void> {
+    if (this.closing !== null) return this.closing;
+    this.draining = true;
+    const runs = [...this.live.values()];
+    for (const live of runs) {
+      live.stopRequested = true;
+      live.abort.abort();
+    }
+    this.closing = Promise.all(runs.map((live) => live.done)).then(() => undefined).finally(() => { this.keys.clear(); });
+    return this.closing;
+  }
+
   /** Server-side credential accessor for discovery/connection tests. Never serialized. */
-  providerApiKey(provider: string): string {
+  providerApiKey(provider: string, baseUrl: string | null = null): string {
     if (!isKnownProviderId(provider)) throw new Error(`unsupported provider ${provider}`);
-    return this.apiKeyFor(provider);
+    return this.apiKeyFor(provider, baseUrl);
   }
 
   /**
@@ -158,33 +199,37 @@ export class TaskManager {
     return dirs;
   }
 
-  keyConfigured(provider: string): boolean {
-    if (!isKnownProviderId(provider)) return false;
-    // LATTICE_API_KEY remains a fallback for the openai preset only; every
-    // other preset resolves credentials from explicit in-memory keys.
-    const env = provider === "openai" ? process.env["LATTICE_API_KEY"] : undefined;
-    return (env !== undefined && env.trim() !== "") || this.keys.has(provider);
+  private credentialSlot(provider: string, baseUrl: string | null): string {
+    if (!isKnownProviderId(provider)) throw new Error("unsupported provider");
+    const endpoint = baseUrl?.trim() || findPreset(provider)?.defaultBaseUrl;
+    if (!endpoint) throw new Error("custom credentials need an explicit endpoint");
+    return `${provider}:${normalizeEndpoint(endpoint)}`;
   }
 
-  setKey(provider: string, key: string): void {
-    if (!isKnownProviderId(provider) || key.trim() === "") {
-      throw new Error("only a known provider preset accepts an in-memory key");
-    }
-    this.keys.set(provider, key);
+  keyConfigured(provider: string, baseUrl: string | null = null): boolean {
+    try { return this.apiKeyFor(provider, baseUrl).trim() !== ""; } catch { return false; }
+  }
+
+  setKey(provider: string, key: string, baseUrl: string | null = null): void {
+    if (key.trim() === "") throw new Error("an in-memory key must be non-empty");
+    const slot = this.credentialSlot(provider, baseUrl);
+    requireCredentialTransport(slot.slice(provider.length + 1), key);
+    this.keys.set(slot, key);
   }
 
   removeKey(provider: string): boolean {
-    if (!isKnownProviderId(provider)) {
-      throw new Error("only a known provider preset has a key slot");
-    }
-    return this.keys.delete(provider);
+    if (!isKnownProviderId(provider)) throw new Error("unsupported provider");
+    let removed = false;
+    for (const slot of this.keys.keys()) if (slot.startsWith(`${provider}:`)) removed = this.keys.delete(slot) || removed;
+    return removed;
   }
 
-  private apiKeyFor(provider: string): string {
-    if (provider === "openai") {
-      return this.keys.get("openai") ?? process.env["LATTICE_API_KEY"] ?? "";
-    }
-    return this.keys.get(provider) ?? "";
+  private apiKeyFor(provider: string, baseUrl: string | null = null): string {
+    const slot = this.credentialSlot(provider, baseUrl);
+    const key = this.keys.get(slot);
+    if (key !== undefined) return key;
+    const defaultSlot = `openai:${normalizeEndpoint("https://api.openai.com/v1")}`;
+    return slot === defaultSlot ? process.env["LATTICE_API_KEY"] ?? "" : "";
   }
 
   private nextSeq(taskId: string): number {
@@ -230,8 +275,8 @@ export class TaskManager {
   toolDetail(taskId: string, attemptId: string): { attemptId: string; detail: string; truncated: boolean } {
     this.contractOf(taskId);
     const row = this.db
-      .prepare("SELECT detail FROM receipts WHERE attempt_id = ?")
-      .get(attemptId) as { detail: string } | undefined;
+      .prepare("SELECT r.detail FROM receipts r JOIN attempts a ON a.attempt_id = r.attempt_id JOIN intents i ON i.intent_id = a.intent_id WHERE r.attempt_id = ? AND i.task_id = ?")
+      .get(attemptId, taskId) as { detail: string } | undefined;
     if (row === undefined) throw new Error(`unknown tool result ${attemptId}`);
     const detail = JSON.parse(row.detail) as { summary?: unknown; detail?: unknown };
     const inner = typeof detail.detail === "string" ? (JSON.parse(detail.detail) as { output?: unknown; outputTruncated?: unknown }) : {};
@@ -255,10 +300,20 @@ export class TaskManager {
     return { events: [], resync: true };
   }
 
-  private recordEvent(taskId: string, kind: string, payload: Record<string, unknown>): void {
-    this.db
+  private recordEvent(taskId: string, kind: string, payload: Record<string, unknown>): number {
+    const inserted = this.db
       .prepare("INSERT INTO events (kind, task_id, payload, recorded_at) VALUES (?, ?, ?, ?)")
       .run(kind, taskId, JSON.stringify(payload), new Date().toISOString());
+    // Project committed observations through the same readers as snapshots.
+    // Live clients must see verification and chat without reloading the UI.
+    if (kind === "chat") {
+      const message = this.readMessages(taskId).at(-1);
+      if (message !== undefined) this.emit(taskId, { seq: 0, kind: "message", message });
+    } else if (kind === "verification") {
+      const verification = this.readVerifications(taskId).at(-1);
+      if (verification !== undefined) this.emit(taskId, { seq: 0, kind: "verification", verification });
+    }
+    return Number(inserted.lastInsertRowid);
   }
 
   private contractOf(taskId: string): TaskContract {
@@ -340,11 +395,14 @@ export class TaskManager {
 
   private setState(taskId: string, state: TaskState, reason: string): void {
     this.recordEvent(taskId, "task-state", { state, reason });
+    this.emit(taskId, { seq: 0, kind: "budget", budget: this.readBudget(taskId) });
     this.emit(taskId, { seq: 0, kind: "state", state, reason, contractRevision: this.contractOf(taskId).revision });
   }
 
   createTask(options: ServerTaskOptions): { taskId: string; rootId: string } {
+    if (this.draining) throw new Error("runtime is shutting down");
     const resolved = this.resolveWorkspace(options.workspace);
+    if (options.baseUrl !== null) normalizeEndpoint(options.baseUrl);
     if (options.objective.trim() === "") throw new Error("objective must be non-empty");
     if (!isKnownProviderId(options.provider)) throw new Error("only a known provider preset is served over HTTP");
     const taskId = `task-${randomUUID()}`;
@@ -354,7 +412,7 @@ export class TaskManager {
       rootId,
       objective: options.objective,
       scope: [resolved],
-      acceptanceCriteria: ["task completed as verified"],
+      acceptanceCriteria: options.acceptance.length > 0 ? options.acceptance : defaultAcceptance(options.objective),
       obligations: ["preserve human work"],
       grants: [
         {
@@ -362,14 +420,14 @@ export class TaskManager {
           operations: ["search", "read", "edit", "exec", "process", "model.invoke"],
           targets: [resolved],
           expiresAt: null,
-          limits: { maxCalls: this.defaultGrants.calls, maxTokens: this.defaultGrants.tokens },
+          limits: { maxCalls: (options.budget ?? this.defaultGrants).calls, maxTokens: (options.budget ?? this.defaultGrants).tokens },
         },
       ],
       prohibitions: ["publish"],
       realm: "local-trusted",
       allowedProvider: options.provider,
       allowedModel: options.model,
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      expiresAt: options.expiresAt ?? null,
       retentionPolicy: "retain until explicit deletion",
       origin: "ui create-task",
     });
@@ -379,18 +437,20 @@ export class TaskManager {
       .prepare("INSERT INTO runs (run_id, session_id, root_id, task_id, manifest, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(
         runId,
-        `session-${randomUUID()}`,
+        openSession(this.db, rootId).sessionId,
         rootId,
         taskId,
         JSON.stringify({ provider: options.provider, model: options.model, baseUrl: options.baseUrl, workspace: resolved, packageVersion: PACKAGE_VERSION }),
         new Date().toISOString(),
       );
     this.steerings.set(taskId, []);
+    this.recordEvent(taskId, "chat", { author: "user", text: options.objective, id: `objective-${taskId}` });
     this.setState(taskId, "READY", "task created");
     return { taskId, rootId };
   }
 
   private resolveWorkspace(requested: string): string {
+    if (this.serverWorkspace === "") throw new Error("choose a project before creating a task");
     // Containment is decided on canonical paths (symlink-free) so a link
     // inside the root cannot point outside of it; the returned path stays
     // lexical to preserve exact scope strings, snapshots and UI display.
@@ -408,20 +468,23 @@ export class TaskManager {
   startTask(taskId: string, commandId: string, adapterOverride?: ProviderAdapter): CommandResult {
     const contract = this.contractOf(taskId);
     const current = this.readState(taskId);
-    if (current.state !== "READY") {
+    if (this.draining || this.live.size !== 0 || current.state !== "READY") {
       return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
     }
     const manifest = this.readManifest(taskId);
-    const adapter = adapterOverride ?? this.buildAdapter(manifest.provider, manifest.baseUrl);    const live: LiveRun = {
+    const adapter = adapterOverride ?? this.buildAdapter(manifest.provider, manifest.baseUrl);
+    const supervisor = new ProcessSupervisor(contract.scope[0] ?? this.serverWorkspace);
+    const live: LiveRun = {
       abort: new AbortController(),
       done: Promise.resolve({ decision: "STOP", reason: "", iterations: 0, modelCalls: 0, toolDispatches: 0 }),
       pendingSteerings: new Map(),
       pendingModel: null,
       stopRequested: false,
+      supervisor,
+      waitAbort: null,
     };
     this.live.set(taskId, live);
-    const supervisor = new ProcessSupervisor(contract.scope[0] ?? this.serverWorkspace);
-    const ledger = new VerifyLedger();
+    const acceptance = new TaskAcceptance(contract.scope[0] ?? this.serverWorkspace, contract.acceptanceCriteria);
     const surface: TaskSurface = {
       objective: contract.objective,
       acceptanceCriteria: [...contract.acceptanceCriteria],
@@ -433,7 +496,7 @@ export class TaskManager {
       versions: [],
       lastError: null,
     };
-    const modelRef = { provider: adapter, model: manifest.model };
+    const modelRef = { provider: adapter, model: manifest.model, providerId: manifest.provider, endpoint: normalizeEndpoint(manifest.baseUrl ?? findPreset(manifest.provider)?.defaultBaseUrl ?? "") };
     const tools = buildToolset({ supervisor });
     // Composition epoch: opened/advanced exactly once per activation under
     // the CURRENT route. Same route re-entry (refresh, reconnect, restart of
@@ -455,13 +518,13 @@ export class TaskManager {
       this.db,
       taskId,
       {
-        pollProcess: async (handle) => {
-          const out = await supervisor.execute({ op: "poll", handle, timeoutMs: 0, generation });
-          if (out.errorKind !== undefined) return { lost: true, reason: out.summary };
+        pollProcess: (handle) => {
+          const out = supervisor.observe(handle, generation);
+          if (out.errorKind !== undefined) return Promise.resolve({ lost: true as const, reason: out.summary });
           if (out.status === "completed" && out.complete === true) {
-            return { running: false as const, observation: `[process ${handle}] ${out.summary}` };
+            return Promise.resolve({ running: false as const, observation: `[process ${handle}] ${out.summary}\n${out.detail?.slice(0, 64 * 1024) ?? ""}${(out.detail?.length ?? 0) > 64 * 1024 ? "\n[durable observation output truncated; explicit process poll retains supervisor output]" : ""}` });
           }
-          return { running: true as const };
+          return Promise.resolve({ running: true as const });
         },
       },
       contract.obligations[0] ?? "complete the task",
@@ -478,7 +541,6 @@ export class TaskManager {
           out.result,
           Date.now() - startedAt,
         );
-        ledger.record(summary);
         this.recordEvent(taskId, "verification", {
           command: summary.command,
           cwd: summary.cwd,
@@ -489,6 +551,15 @@ export class TaskManager {
           countsKnown: summary.countsKnown,
         });
         return out;
+      };
+    }
+    for (const tool of tools) {
+      const run = tool.run.bind(tool);
+      tool.run = async (argsJson, context) => {
+        await acceptance.prepare(tool.name, context.signal);
+        const outcome = await run(argsJson, context);
+        await acceptance.observe(tool.name, argsJson, outcome.result);
+        return outcome;
       };
     }
     const loopOptions: LoopOptions = {
@@ -505,10 +576,44 @@ export class TaskManager {
       ownerGeneration: generation,
       grantedCalls: granted.calls,
       grantedTokens: granted.tokens,
-      maxIterations: 25,
       signal: live.abort.signal,
-      acceptanceVerifiers: [() => ledger.check()],
+      beforeRequest: () => {
+        this.applyPending(taskId, live, modelRef);
+        surface.objective = contract.objective;
+        surface.acceptanceCriteria = [...contract.acceptanceCriteria];
+        surface.prohibitions = [...contract.prohibitions];
+        surface.obligations = [...contract.obligations];
+        surface.humanDecisions = this.storedSteerings(taskId).map((record) => record.text);
+        surface.unknowns = unknownHistory(this.db, taskId).map((entry) => `${entry.attemptId}: ${entry.reason}`);
+      },
+      onRequestBound: (binding) => {
+        // Publish the active route only with its binding and revision ACK.
+        // Preparing a route that admission later denies remains pending.
+        this.db.prepare("UPDATE runs SET manifest = ? WHERE run_id = ? AND task_id = ?").run(
+          JSON.stringify({ ...manifest, provider: binding.provider, model: binding.model, baseUrl: binding.endpoint, packageVersion: PACKAGE_VERSION }), taskRun.runId, taskId);
+        this.acknowledgeSteering(taskId, binding.contractRevision);
+        this.recordEvent(taskId, "composition", { provider: binding.provider, model: binding.model, baseUrl: binding.endpoint, applied: true, epoch: binding.compositionEpoch });
+      },
+      afterRequestBound: () => { this.steerings.delete(taskId); this.emit(taskId, { seq: 0, kind: "resync", cut: this.seqs.get(taskId) ?? 0 }); },
+      acceptanceVerifiers: [async (response) => {
+        const check = await acceptance.check(response?.text);
+        if (check.complete) this.recordEvent(taskId, "acceptance", { ...check, criteria: contract.acceptanceCriteria, revision: contract.revision, observedAt: new Date().toISOString() });
+        return check;
+      }],
+      verifyAfterTools: acceptance.hasFilesystemPredicate,
       waiter,
+      awaitWake: async (wait) => {
+        this.emit(taskId, { seq: 0, kind: "budget", budget: this.readBudget(taskId) });
+        this.emit(taskId, { seq: 0, kind: "state", state: "WAITING", reason: `waiting: ${wait.condition}; keep the app open for process observations`, contractRevision: contract.revision });
+        const entry = listActiveWaits(this.db, taskId).find((item) => item.waitId === wait.waitId);
+        if (entry === undefined) return;
+        const handle = entry.source.startsWith("process:") ? entry.source.slice("process:".length) : "";
+        live.waitAbort = new AbortController();
+        const signals = [live.abort.signal, live.waitAbort.signal];
+        if (contract.expiresAt !== null) signals.push(AbortSignal.timeout(Math.max(1, Date.parse(contract.expiresAt) - Date.now())));
+        await supervisor.waitForExit(handle, generation, AbortSignal.any(signals));
+        live.waitAbort = null;
+      },
       onEvent: (event) => {
         if (event.kind === "tool-end") waiter.noteToolEnd(event.tool, event.status, event.handle);
         this.onLoopEvent(taskId, live, event);
@@ -518,15 +623,18 @@ export class TaskManager {
       },
     };
     this.setState(taskId, "RUNNING", "loop started");
+    const finish = async (stop: LoopStop): Promise<LoopStop> => {
+      const cleanup = await supervisor.close();
+      for (const observation of cleanup) this.recordEvent(taskId, "process-cleanup", observation);
+      const uncertain = cleanup.some(({ result }) => result.complete !== true || result.effectUncertain === true);
+      this.onLoopStop(taskId, live, stop.decision, stop.reason, stop.wait, uncertain);
+      return stop;
+    };
     live.done = runTaskLoop(loopOptions).then(
-      (stop) => {
-        this.onLoopStop(taskId, live, stop.decision, stop.reason, stop.wait);
-        return stop;
-      },
+      finish,
       (error: unknown) => {
         const stop = { decision: "ESCALATE" as const, reason: error instanceof Error ? error.message : "loop crashed", iterations: 0, modelCalls: 0, toolDispatches: 0 };
-        this.onLoopStop(taskId, live, stop.decision, stop.reason);
-        return stop;
+        return finish(stop);
       },
     );
     void live.done.catch(() => undefined);
@@ -558,7 +666,7 @@ export class TaskManager {
     // always carry an explicit endpoint).
     if (!isKnownProviderId(provider)) throw new Error(`unsupported provider ${provider}`);
     const effectiveBase = baseUrl ?? findPreset(provider)?.defaultBaseUrl ?? null;
-    const apiKey = this.apiKeyFor(provider);
+    const apiKey = this.apiKeyFor(provider, baseUrl);
     if (effectiveBase === null) {
       throw new Error(`${provider} needs an explicit base URL`);
     }
@@ -603,22 +711,26 @@ export class TaskManager {
 
   private onLoopEvent(
     taskId: string,
-    live: LiveRun,
-    event: { kind: string; attemptId?: string; tool?: string; status?: string; toolCalls?: number },
+    _live: LiveRun,
+    event: { kind: string; attemptId?: string; tool?: string; status?: string; toolCalls?: number; text?: string },
   ): void {
-    if (event.kind === "model-request") {
-      this.applyPending(taskId, live);
+    if (event.kind === "wake") {
+      this.setState(taskId, "RUNNING", "durable process/wake observation; continuing the same activation");
+      this.recordEvent(taskId, "chat", { author: "system", text: event.text ?? "wake observed" });
+      return;
     }
     if (event.kind === "model-response") {
+      this.emit(taskId, { seq: 0, kind: "budget", budget: this.readBudget(taskId) });
       return;
     }
     if (event.kind === "tool-start" && event.tool !== undefined && event.attemptId !== undefined) {
+      const activitySeq = this.recordEvent(taskId, "tool-activity", { attemptId: event.attemptId });
       this.emit(taskId, {
         seq: 0,
         kind: "tool",
         tool: {
           id: event.attemptId,
-          seq: 0,
+          seq: activitySeq,
           tool: event.tool,
           target: null,
           status: "running",
@@ -633,71 +745,67 @@ export class TaskManager {
       });
     }
     if (event.kind === "tool-end" && event.tool !== undefined && event.attemptId !== undefined) {
-      this.emit(taskId, {
-        seq: 0,
-        kind: "tool",
-        tool: {
-          id: event.attemptId,
-          seq: 0,
-          tool: event.tool,
-          target: null,
-          status: toToolStatus("RESOLVED", event.status === "confirmed" ? "confirmed" : event.status === "unknown" ? "unknown" : "failed"),
-          summary: `${event.tool} ${event.status ?? "ended"}`,
-          detail: null,
-          version: null,
-          complete: event.status === "confirmed" || event.status === "failed" ? true : event.status === "unknown" ? false : null,
-          truncated: false,
-          durationMs: null,
-          recordedAt: new Date().toISOString(),
-        },
-      });
+      const tool = this.readTools(taskId).find((entry) => entry.id === event.attemptId);
+      if (tool !== undefined) this.emit(taskId, { seq: 0, kind: "tool", tool });
     }
   }
 
-  private applyPending(taskId: string, live: LiveRun): void {
-    for (const [steeringId, revision] of live.pendingSteerings) {
-      const list = this.steerings.get(taskId) ?? [];
-      const record = list.find((entry) => entry.id === steeringId);
-      if (record !== undefined && record.state === "accepted") {
-        record.state = "applied";
-        record.appliedRevision = revision;
-        this.recordEvent(taskId, "steering-applied", { id: steeringId, revision });
-        this.emit(taskId, { seq: 0, kind: "steering", steering: toSteeringView(record), contractRevision: revision });
+  private applyPending(taskId: string, live: LiveRun, modelRef: NonNullable<LoopOptions["modelRef"]>): void {
+    const durable = takePendingRevisions(this.db, taskId).filter((entry) => entry.payload["kind"] === "model-selection").at(-1)?.payload;
+    const pending = durable === undefined ? live.pendingModel : {
+      provider: String(durable["provider"]), model: String(durable["model"]), baseUrl: typeof durable["baseUrl"] === "string" ? durable["baseUrl"] : null,
+    };
+    if (pending === null) return;
+    const adapter = this.buildAdapter(pending.provider, pending.baseUrl);
+    const endpoint = normalizeEndpoint(pending.baseUrl ?? findPreset(pending.provider)?.defaultBaseUrl ?? "");
+    const contract = this.contractOf(taskId);
+    let revised: TaskContract | undefined;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (contract.allowedProvider !== pending.provider || contract.allowedModel !== pending.model) {
+        revised = reviseContract(contract, { allowedProvider: pending.provider, allowedModel: pending.model, origin: "human model selection at safe point" });
+        this.db.prepare("UPDATE contracts SET document = ?, revision = ?, updated_at = ? WHERE task_id = ?").run(JSON.stringify(revised), revised.revision, new Date().toISOString(), taskId);
       }
-    }
-    live.pendingSteerings.clear();
-    // Safe-point route switch: the pending model becomes the CURRENT route
-    // exactly once, at a model-request boundary (never mid-dispatch), and
-    // advances the composition epoch. Late responses to older epochs stay
-    // evidence for their own attempts (see composition.ts) and never restore
-    // the previous route.
-    if (live.pendingModel !== null) {
-      const pending = live.pendingModel;
-      live.pendingModel = null;
-      try {
-        const manifest = this.readManifest(taskId);
-        const tools = buildToolset({});
-        const next = advanceCompositionEpoch(
-          this.db,
-          taskId,
-          compositionForRoute(pending.provider, pending.model, tools.map((tool) => tool.definition)),
-        );
-        this.db
-          .prepare("UPDATE runs SET manifest = ? WHERE task_id = ?")
-          .run(
-            JSON.stringify({ provider: pending.provider, model: pending.model, baseUrl: pending.baseUrl, workspace: manifest.workspace, packageVersion: PACKAGE_VERSION, compositionEpoch: next.epoch, compositionDigest: next.digest }),
-            taskId,
-          );
-        this.recordEvent(taskId, "composition", { provider: pending.provider, model: pending.model, baseUrl: pending.baseUrl, applied: true, epoch: next.epoch, digest: next.digest });
-      } catch {
-        // Fail closed on manifest/epoch errors: the switch does not apply,
-        // the loop continues on the current route with evidence preserved.
-        this.recordEvent(taskId, "composition", { provider: pending.provider, model: pending.model, applied: false, reason: "epoch advance failed" });
-      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    if (revised !== undefined) Object.assign(contract, revised);
+    modelRef.provider = adapter;
+    modelRef.model = pending.model;
+    modelRef.providerId = pending.provider;
+    modelRef.endpoint = endpoint;
+    live.pendingModel = null;
+  }
+
+  private acknowledgeSteering(taskId: string, revision: number): void {
+    for (const record of this.storedSteerings(taskId)) {
+      if (record.state !== "accepted") continue;
+      this.recordEvent(taskId, "steering-applied", { id: record.id, revision });
     }
   }
 
-  private onLoopStop(taskId: string, live: LiveRun, decision: string, reason: string, wait?: { kind: string }): void {
+  private storedSteerings(taskId: string): StoredSteering[] {
+    const cached = this.steerings.get(taskId);
+    if (cached !== undefined) return cached;
+    const rows = this.db.prepare("SELECT seq, kind, payload, recorded_at FROM events WHERE task_id = ? AND kind IN ('steering','steering-applied') ORDER BY seq").all(taskId) as Array<{ seq: number; kind: string; payload: string; recorded_at: string }>;
+    const records: StoredSteering[] = [];
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload) as Record<string, unknown>;
+      if (row.kind === "steering") records.push({ id: String(payload["id"]), seq: row.seq, text: String(payload["text"]), mode: payload["mode"] === "forbid" ? "forbid" : "guide", state: "accepted", expectedRevision: Number(payload["expectedRevision"]), appliedRevision: null, recordedAt: row.recorded_at });
+      else {
+        const record = records.find((entry) => entry.id === payload["id"]);
+        if (record !== undefined) { record.state = "applied"; record.appliedRevision = Number(payload["revision"]); }
+      }
+    }
+    this.steerings.set(taskId, records);
+    return records;
+  }
+
+  private queueRevision(taskId: string, payload: Record<string, unknown>): void {
+    const row = this.db.prepare("SELECT COALESCE(MAX(revision),0) AS revision FROM pending_revisions WHERE task_id = ?").get(taskId) as { revision: number };
+    notePendingRevision(this.db, taskId, Math.max(row.revision, this.contractOf(taskId).revision) + 1, payload);
+  }
+
+  private onLoopStop(taskId: string, live: LiveRun, decision: string, reason: string, wait?: { kind: string }, cleanupUncertain = false): void {
     // A stable WAIT is not a completion: the loop already persisted the
     // WAITING/NEEDS_INPUT state, so only non-waiting outcomes transition here.
     if (wait !== undefined) {
@@ -706,7 +814,7 @@ export class TaskManager {
       this.emit(taskId, { seq: 0, kind: "state", state: waiting, reason, contractRevision: this.contractOf(taskId).revision });
       return;
     }
-    const state: TaskState = live.stopRequested
+    const state: TaskState = cleanupUncertain ? "BLOCKED" : live.stopRequested
       ? "CANCELLED"
       : decision === "STOP"
         ? "COMPLETED"
@@ -715,7 +823,7 @@ export class TaskManager {
           : decision === "ESCALATE"
             ? "BLOCKED"
             : "CANCELLED";
-    const finalReason = live.stopRequested && state === "CANCELLED" ? `stop requested; ${reason}` : reason;
+    const finalReason = cleanupUncertain ? `${reason}; process cleanup remains UNKNOWN (see process-cleanup observations)` : live.stopRequested && state === "CANCELLED" ? `stop requested; ${reason}` : reason;
     this.live.delete(taskId);
     this.setState(taskId, state, finalReason);
   }
@@ -723,7 +831,7 @@ export class TaskManager {
   steer(taskId: string, commandId: string, expectedRevision: number, text: string, mode: "guide" | "forbid"): CommandResult {
     const contract = this.contractOf(taskId);
     const current = this.readState(taskId);
-    if (current.state !== "RUNNING" && current.state !== "READY" && current.state !== "NEEDS_INPUT") {
+    if (this.draining || (current.state !== "RUNNING" && current.state !== "WAITING" && current.state !== "READY" && current.state !== "NEEDS_INPUT")) {
       return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
     }
     if (expectedRevision !== contract.revision) {
@@ -736,8 +844,6 @@ export class TaskManager {
       mode === "forbid"
         ? reviseContract(contract, { prohibitions: [...contract.prohibitions, text.trim()], origin: "ui steering" })
         : reviseContract(contract, { obligations: [...contract.obligations, `user steering: ${text.trim()}`], origin: "ui steering" });
-    Object.assign(contract, revised);
-    this.writeContract(contract);
     const record: StoredSteering = {
       id: `steer-${randomUUID().slice(0, 8)}`,
       seq: 0,
@@ -748,23 +854,21 @@ export class TaskManager {
       appliedRevision: null,
       recordedAt: new Date().toISOString(),
     };
-    const list = this.steerings.get(taskId) ?? [];
+    const list = this.storedSteerings(taskId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE contracts SET document = ?, revision = ?, updated_at = ? WHERE task_id = ?").run(JSON.stringify(revised), revised.revision, new Date().toISOString(), taskId);
+      recordTaskEvent(this.db, taskId, "steering", { id: record.id, text: record.text, mode, expectedRevision, revision: revised.revision });
+      recordTaskEvent(this.db, taskId, "chat", { author: "user", text: record.text, id: record.id });
+      this.queueRevision(taskId, { kind: "steering", id: record.id, text: record.text, revision: revised.revision });
+      throwIfFault("before-revision-commit");
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    Object.assign(contract, revised);
     list.push(record);
     this.steerings.set(taskId, list);
-    this.recordEvent(taskId, "steering", { id: record.id, text: record.text, mode, expectedRevision, revision: contract.revision });
-    this.recordEvent(taskId, "chat", { author: "user", text: record.text, id: record.id });
-    this.emit(taskId, {
-      seq: 0,
-      kind: "message",
-      message: { id: record.id, seq: 0, author: "user", text: record.text, recordedAt: record.recordedAt },
-    });
-    const live = this.live.get(taskId);
-    if (live !== undefined && current.state === "RUNNING") {
-      live.pendingSteerings.set(record.id, contract.revision);
-    } else {
-      record.state = "applied";
-      record.appliedRevision = contract.revision;
-    }
+    const message = this.readMessages(taskId).at(-1);
+    if (message !== undefined) this.emit(taskId, { seq: 0, kind: "message", message });
     this.emit(taskId, { seq: 0, kind: "steering", steering: toSteeringView(record), contractRevision: contract.revision });
     return { accepted: true, commandId, taskId, revision: contract.revision, state: current.state };
   }
@@ -773,7 +877,7 @@ export class TaskManager {
     const contract = this.contractOf(taskId);
     const current = this.readState(taskId);
     const live = this.live.get(taskId);
-    if (live === undefined || current.state !== "RUNNING") {
+    if (live === undefined || (current.state !== "RUNNING" && current.state !== "WAITING" && current.state !== "NEEDS_INPUT")) {
       return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
     }
     live.stopRequested = true;
@@ -786,7 +890,7 @@ export class TaskManager {
   // the client sends start-task explicitly afterwards.
   resumeTask(taskId: string, commandId: string): CommandResult {
     const contract = this.contractOf(taskId);
-    if (this.live.get(taskId) !== undefined) {
+    if (this.draining || this.live.get(taskId) !== undefined) {
       return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: this.readState(taskId).state };
     }
     // The resume run inherits the task composition so later reads of the
@@ -815,6 +919,7 @@ export class TaskManager {
   ): CommandResult {
     const contract = this.contractOf(taskId);
     const state = this.readState(taskId).state;
+    if (this.draining) return { accepted: false, commandId, reason: "denied", revision: contract.revision, state };
     const wakeId = input.edge ? edgeWakeId() : levelWakeId(taskId, input.source, input.cursor);
     try {
       const result = recordWake(this.db, taskId, {
@@ -828,6 +933,7 @@ export class TaskManager {
       if (result.duplicate) {
         return { accepted: false, commandId, reason: "duplicate", revision: contract.revision, state };
       }
+      if (result.fired) this.live.get(taskId)?.waitAbort?.abort();
       return { accepted: true, commandId, taskId, revision: contract.revision, state };
     } catch {
       return { accepted: false, commandId, reason: "invalid", revision: contract.revision, state };
@@ -837,6 +943,11 @@ export class TaskManager {
   selectModel(taskId: string, commandId: string, provider: string, model: string, baseUrl: string | null): CommandResult {
     const contract = this.contractOf(taskId);
     const current = this.readState(taskId);
+    if (baseUrl !== null) {
+      try { normalizeEndpoint(baseUrl); }
+      catch { return { accepted: false, commandId, reason: "invalid", revision: this.safeRevision(taskId), state: this.safeState(taskId) }; }
+    }
+    if (this.draining) return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
     if (!isKnownProviderId(provider) || model.trim() === "") {
       return { accepted: false, commandId, reason: "invalid", revision: contract.revision, state: current.state };
     }
@@ -847,14 +958,16 @@ export class TaskManager {
       return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
     }
     const live = this.live.get(taskId);
-    if (live !== undefined && current.state === "RUNNING") {
-      live.pendingModel = { provider, model, baseUrl };
-    } else {
-      this.db
-        .prepare("UPDATE runs SET manifest = ? WHERE task_id = ?")
-        .run(JSON.stringify({ provider, model, baseUrl, workspace: contract.scope[0] ?? this.serverWorkspace, packageVersion: PACKAGE_VERSION }), taskId);
-    }
-    this.recordEvent(taskId, "composition", { provider, model, baseUrl, applied: live === undefined });
+    if (["COMPLETED", "CANCELLED"].includes(current.state)) return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.queueRevision(taskId, { kind: "model-selection", provider, model, baseUrl });
+      recordTaskEvent(this.db, taskId, "composition", { provider, model, baseUrl, applied: false });
+      throwIfFault("before-revision-commit");
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    if (live !== undefined) live.pendingModel = { provider, model, baseUrl };
+    this.emit(taskId, { seq: 0, kind: "resync", cut: this.seqs.get(taskId) ?? 0 });
     return { accepted: true, commandId, taskId, revision: contract.revision, state: current.state };
   }
 
@@ -909,7 +1022,15 @@ export class TaskManager {
         if (provider === "custom" && baseUrl === null) {
           return { accepted: false, commandId: command.commandId, reason: "invalid", revision: 0, state: "READY" };
         }
-        const { taskId } = this.createTask({ workspace, objective, acceptance: [], provider, model, baseUrl });
+        const rawBudget = payload["budget"];
+        if (rawBudget !== undefined && (rawBudget === null || typeof rawBudget !== "object" || Array.isArray(rawBudget))) throw new Error("budget must contain calls/tokens, each a positive integer or null");
+        const budget = rawBudget as BudgetGrant | undefined;
+        const rawExpiry = payload["expiresAt"];
+        if (rawExpiry !== undefined && rawExpiry !== null && typeof rawExpiry !== "string") throw new Error("expiresAt must be a timestamp or null");
+        const rawAcceptance = payload["acceptance"];
+        if (rawAcceptance !== undefined && (!Array.isArray(rawAcceptance) || rawAcceptance.some((criterion) => typeof criterion !== "string" || criterion.trim() === ""))) throw new Error("acceptance must be an array of non-empty criteria");
+        const { taskId } = this.createTask({ workspace, objective, acceptance: (rawAcceptance ?? []) as string[], provider, model, baseUrl,
+          ...(budget === undefined ? {} : { budget }), ...(rawExpiry === undefined ? {} : { expiresAt: rawExpiry }) });
         const contract = this.contractOf(taskId);
         return { accepted: true, commandId: command.commandId, taskId, revision: contract.revision, state: "READY" };
       }
@@ -983,10 +1104,19 @@ export class TaskManager {
         if (typeof provider !== "string" || !isKnownProviderId(provider) || typeof key !== "string" || key.trim() === "") {
           return { accepted: false, commandId: command.commandId, reason: "invalid", revision: 0, state: "READY" };
         }
-        this.setKey(provider, key);
+        const endpoint = payload["baseUrl"];
+        if (endpoint !== undefined && endpoint !== null && typeof endpoint !== "string") return { accepted: false, commandId: command.commandId, reason: "invalid", revision: 0, state: "READY" };
+        try { this.setKey(provider, key, typeof endpoint === "string" ? endpoint : null); }
+        catch { return { accepted: false, commandId: command.commandId, reason: "invalid", revision: 0, state: "READY" }; }
         return { accepted: true, commandId: command.commandId, taskId: command.taskId ?? "", revision: 0, state: "READY" };
       }
     }
+  }
+
+  private pendingModelSelection(taskId: string): { provider: string; model: string; baseUrl: string | null } | null {
+    const pending = takePendingRevisions(this.db, taskId).filter(entry => entry.payload["kind"] === "model-selection").at(-1)?.payload;
+    if (pending === undefined) return null;
+    return { provider: String(pending["provider"]), model: String(pending["model"]), baseUrl: typeof pending["baseUrl"] === "string" ? pending["baseUrl"] : null };
   }
 
   snapshot(taskId: string): TaskSnapshot {
@@ -996,10 +1126,9 @@ export class TaskManager {
     const messages = this.readMessages(taskId);
     const tools = this.readTools(taskId);
     const verifications = this.readVerifications(taskId);
-    const steering = (this.steerings.get(taskId) ?? []).map(toSteeringView);
+    const steering = this.storedSteerings(taskId).map(toSteeringView);
     const budget = this.readBudget(taskId);
     const unknowns = this.countUnknowns(taskId);
-    const live = this.live.get(taskId);
     const gate = this.resumePreview(taskId);
     return {
       protocol: PROTOCOL_VERSION,
@@ -1011,10 +1140,11 @@ export class TaskManager {
       state: state.state,
       stateReason: state.reason,
       contractRevision: contract.revision,
-      provider: live?.pendingModel?.provider ?? manifest.provider,
-      model: live?.pendingModel?.model ?? manifest.model,
+      provider: manifest.provider,
+      model: manifest.model,
       baseUrl: manifest.baseUrl,
-      keyConfigured: this.keyConfigured(manifest.provider),
+      keyConfigured: this.keyConfigured(manifest.provider, manifest.baseUrl),
+      pendingModel: this.pendingModelSelection(taskId),
       unknowns,
       unknownHistory: unknownHistory(this.db, taskId).map((entry) => ({
         attemptId: entry.attemptId,
@@ -1069,7 +1199,9 @@ export class TaskManager {
   private readTools(taskId: string): ToolActivityView[] {
     const rows = this.db
       .prepare(
-        `SELECT a.attempt_id, a.created_at, i.operation, i.target, a.state, r.outcome, r.detail, r.recorded_at
+        `SELECT a.attempt_id, a.created_at, i.operation, i.target, a.state, r.outcome, r.detail, r.recorded_at,
+         COALESCE((SELECT MIN(e.seq) FROM events e WHERE e.task_id = i.task_id AND e.kind = 'tool-activity' AND json_extract(e.payload, '$.attemptId') = a.attempt_id),
+           (SELECT COALESCE(MAX(e.seq), 0) + 0.5 FROM events e WHERE e.task_id = i.task_id AND e.recorded_at <= a.created_at)) AS activity_seq
          FROM attempts a
          JOIN intents i ON i.intent_id = a.intent_id
          LEFT JOIN receipts r ON r.attempt_id = a.attempt_id
@@ -1085,8 +1217,9 @@ export class TaskManager {
       outcome: string | null;
       detail: string | null;
       recorded_at: string | null;
+      activity_seq: number;
     }>;
-    return rows.map((row, index) => {
+    return rows.map((row) => {
       let summary = row.state;
       let detail: string | null = null;
       let version: string | null = null;
@@ -1104,7 +1237,7 @@ export class TaskManager {
       const durationMs = durationBetween(row.created_at, row.recorded_at);
       return {
         id: row.attempt_id,
-        seq: index,
+        seq: row.activity_seq,
         tool: row.operation,
         target: row.target,
         status: toToolStatus(row.state, row.outcome),
@@ -1156,6 +1289,7 @@ export class TaskManager {
       reservedTokens: snapshot.reserved.tokens,
       settledCalls: snapshot.settled.calls,
       settledTokens: snapshot.settled.tokens,
+      uncertainUsageAttempts: (this.db.prepare(`SELECT COUNT(*) AS n FROM attempt_usage u JOIN attempts a ON a.attempt_id = u.attempt_id JOIN intents i ON i.intent_id = a.intent_id WHERE i.task_id = ? AND u.revision = (SELECT MAX(revision) FROM attempt_usage WHERE attempt_id = u.attempt_id) AND json_extract(u.document, '$.usageFinal') = 0`).get(taskId) as { n: number }).n,
     };
   }
 
@@ -1170,11 +1304,12 @@ export class TaskManager {
   // admissions of a live run, only reports. Classification happens on real
   // resume (gate or resume-task command), never on a hot read path.
   private resumePreview(taskId: string): { canResume: boolean; blockers: Array<{ code: string }> } {
+    if (this.live.has(taskId)) return { canResume: false, blockers: [{ code: "active-runtime" }] };
     try {
       const report = evaluateResumeGate(
         this.db,
         { taskId, generation: this.readGeneration(), packageVersion: PACKAGE_VERSION },
-        { classifyPending: !this.live.has(taskId) },
+        { classifyPending: false },
       );
       return { canResume: report.canResume, blockers: report.blockers };
     } catch {

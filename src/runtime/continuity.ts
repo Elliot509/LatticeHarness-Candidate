@@ -91,7 +91,7 @@ export function listSessions(db: DatabaseSync, limit = 100): SessionRow[] {
 
 // Granted budget is always derived from the persisted contract grants, so a
 // restart can never renew it. Prefers the grant covering model.invoke.
-export function grantedFromContract(contract: TaskContract): { calls: number; tokens: number } {
+export function grantedFromContract(contract: TaskContract): { calls: number | null; tokens: number | null } {
   const modelGrant = contract.grants.find((grant) => grant.operations.includes("model.invoke"));
   const grant = modelGrant ?? contract.grants[0];
   if (grant === undefined) throw new Error(`contract ${contract.taskId} carries no grants`);
@@ -339,12 +339,12 @@ export interface ResumeReport {
   stateReason: string;
   generation: number;
   budget: {
-    granted: { calls: number; tokens: number };
+    granted: { calls: number | null; tokens: number | null };
     reserved: { calls: number; tokens: number };
     settled: { calls: number; tokens: number };
   };
   expired: boolean;
-  expiresAt: string;
+  expiresAt: string | null;
   workspaceOk: boolean;
   workspaceDetail: string;
   unknowns: UnknownSummary[];
@@ -423,6 +423,7 @@ export function evaluateResumeGate(db: DatabaseSync, input: ResumeGateInput, opt
 
   const invalidatedAdmissions = options?.classifyPending === false ? [] : classifyUnfinishedIntents(db, input.taskId);
   const unknowns = unknownHistory(db, input.taskId);
+  if (unknowns.length > 0) blockers.push({ code: "unknown-effects", detail: "Unresolved effects must be reconciled before a new activation" });
   const drift = workspaceOk && workspace !== "" ? detectWorkspaceDrift(db, input.taskId, workspace) : [];
   const staleEvidence = drift.map((entry) => ({
     path: entry.path,
@@ -605,7 +606,7 @@ export function resumeTask(db: DatabaseSync, input: ResumeGateInput & { manifest
       manifest: { resumedFromState: report.state, resumedAt: new Date().toISOString(), ...(input.manifestExtra ?? {}) },
     },
   );
-  if (report.state === "RUNNING") {
+  if (["RUNNING", "BLOCKED", "NEEDS_INPUT", "WAITING"].includes(report.state)) {
     recordTaskEvent(db, report.taskId, "task-state", {
       state: "READY",
       reason: "manual resume after restart; unfinished intents classified, no effect replayed",

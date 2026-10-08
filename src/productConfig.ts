@@ -13,6 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { normalizeEndpoint } from "./providers/endpoint.js";
 
 export const PRODUCT_CONFIG_SCHEMA = 1;
 export const PRODUCT_CONFIG_FILENAME = "lattice.product.json";
@@ -71,7 +72,7 @@ function sanitizeCustomProviders(value: unknown): CustomProviderRecord[] {
     const baseUrl = record?.["baseUrl"];
     const keyRequired = record?.["keyRequired"];
     if (typeof displayName !== "string" || typeof baseUrl !== "string" || typeof keyRequired !== "boolean") continue;
-    records.push({ displayName, baseUrl, keyRequired });
+    records.push({ displayName, baseUrl: normalizeEndpoint(baseUrl), keyRequired });
   }
   return records;
 }
@@ -101,7 +102,7 @@ export function parseProductConfig(raw: string): ProductConfig {
   const migrated = defaultProductConfig();
   if (typeof record["defaultProviderId"] === "string") migrated.defaultProviderId = record["defaultProviderId"];
   if (typeof record["defaultModel"] === "string") migrated.defaultModel = record["defaultModel"];
-  if (typeof record["defaultBaseUrl"] === "string") migrated.defaultBaseUrl = record["defaultBaseUrl"];
+  if (typeof record["defaultBaseUrl"] === "string") migrated.defaultBaseUrl = normalizeEndpoint(record["defaultBaseUrl"]);
   migrated.customProviders = sanitizeCustomProviders(record["customProviders"]);
   return migrated;
 }
@@ -129,7 +130,7 @@ export function saveProductConfig(dataDir: string, config: ProductConfig): void 
     schemaVersion: PRODUCT_CONFIG_SCHEMA,
     defaultProviderId: config.defaultProviderId,
     defaultModel: config.defaultModel,
-    defaultBaseUrl: config.defaultBaseUrl,
+    defaultBaseUrl: config.defaultBaseUrl === null ? null : normalizeEndpoint(config.defaultBaseUrl),
     customProviders: sanitizeCustomProviders(config.customProviders),
   };
   assertNoSecrets(normalized, "config");

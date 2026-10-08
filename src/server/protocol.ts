@@ -66,12 +66,13 @@ export interface SteeringView {
 }
 
 export interface BudgetView {
-  grantedCalls: number;
-  grantedTokens: number;
+  grantedCalls: number | null;
+  grantedTokens: number | null;
   reservedCalls: number;
   reservedTokens: number;
   settledCalls: number;
   settledTokens: number;
+  uncertainUsageAttempts?: number;
 }
 
 export interface UnknownView {
@@ -104,6 +105,7 @@ export interface TaskSnapshot {
   model: string;
   baseUrl: string | null;
   keyConfigured: boolean;
+  pendingModel?: { provider: string; model: string; baseUrl: string | null } | null;
   unknowns: number;
   unknownHistory: UnknownView[];
   waits: WaitView[];

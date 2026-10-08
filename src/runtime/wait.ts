@@ -41,7 +41,7 @@ export function enterWait(db: DatabaseSync, taskId: string, request: WaitRequest
   const existing = db.prepare("SELECT state FROM waits WHERE wait_id = ?").get(waitId) as
     | { state: string }
     | undefined;
-  if (existing !== undefined && existing.state !== "cancelled") {
+  if (existing !== undefined && (existing.state === "active" || existing.state === "fired")) {
     return { waitId, created: false };
   }
   const at = now.toISOString();
@@ -309,9 +309,7 @@ export function notePendingRevision(db: DatabaseSync, taskId: string, revision: 
   ).run(taskId, revision, JSON.stringify(payload), new Date().toISOString());
 }
 
-export function takePendingRevisions(db: DatabaseSync, taskId: string): Array<{ revision: number; payload: Record<string, unknown> }> {  guardWrites("takePendingRevisions");
-  db.exec("BEGIN IMMEDIATE");
-  try {
+export function takePendingRevisions(db: DatabaseSync, taskId: string): Array<{ revision: number; payload: Record<string, unknown> }> {
     const rows = db
       .prepare("SELECT revision, payload FROM pending_revisions WHERE task_id = ? ORDER BY revision ASC")
       .all(taskId) as Array<{ revision: number; payload: string }>;
@@ -323,17 +321,13 @@ export function takePendingRevisions(db: DatabaseSync, taskId: string): Array<{ 
         out.push({ revision: row.revision, payload: {} });
       }
     }
-    db.prepare("DELETE FROM pending_revisions WHERE task_id = ?").run(taskId);
-    db.exec("COMMIT");
     return out;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // Original error below remains the actionable signal.
-    }
-    throw error;
-  }
+}
+
+export function acknowledgePendingRevisions(db: DatabaseSync, taskId: string, revisions: readonly number[]): void {
+  guardWrites("acknowledgePendingRevisions");
+  const remove = db.prepare("DELETE FROM pending_revisions WHERE task_id = ? AND revision = ?");
+  for (const revision of revisions) remove.run(taskId, revision);
 }
 
 // Deterministic process probe behind the loop waiter: a zero-timeout poll
@@ -377,7 +371,7 @@ export class HandleWaiter {
   // handles actually need observation, so iterations without handles never
   // pay an async hop (and stay synchronous up to the provider call).
   check(): { wait: WaitRequest } | { woke: { text: string } } | null | Promise<{ wait: WaitRequest } | { woke: { text: string } } | null> {
-    for (const due of dueWaits(this.db)) {
+    for (const due of dueWaits(this.db).filter((wait) => wait.taskId === this.taskId)) {
       const cursor = due.deadline ?? new Date().toISOString();
       const woken = recordWake(this.db, this.taskId, {
         wakeId: levelWakeId(this.taskId, due.source, cursor),
@@ -421,11 +415,11 @@ export class HandleWaiter {
       const probed = await this.probe.pollProcess(handle);
       if ("lost" in probed) {
         this.handles.delete(handle);
-        return { woke: { text: `supervised handle ${handle} is gone (${probed.reason}); treating the process as UNKNOWN until observed` } };
+        return this.processWake(handle, "lost", `supervised handle ${handle} is gone (${probed.reason}); treating the process as UNKNOWN until observed`);
       }
       if (!probed.running) {
         this.handles.delete(handle);
-        return { woke: { text: probed.observation } };
+        return this.processWake(handle, "completed", probed.observation);
       }
     }
     const [first] = [...this.handles];
@@ -439,5 +433,17 @@ export class HandleWaiter {
         obligation: this.obligation,
       },
     };
+  }
+
+  private processWake(handle: string, cursor: string, observation: string): { woke: { text: string } } {
+    const source = `process:${handle}`;
+    const wait = listActiveWaits(this.db, this.taskId).find((entry) => entry.source === source);
+    recordWake(this.db, this.taskId, {
+      wakeId: levelWakeId(this.taskId, source, cursor),
+      ...(wait !== undefined ? { waitId: wait.waitId } : {}),
+      edge: false, source, cursor, observation,
+    });
+    if (wait !== undefined) consumeFiredWait(this.db, this.taskId, wait.waitId);
+    return { woke: { text: observation } };
   }
 }

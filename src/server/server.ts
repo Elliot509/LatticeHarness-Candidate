@@ -15,6 +15,8 @@ import { findPreset, isKnownProviderId, listPresets } from "../providers/presets
 import { listModels, testConnection } from "../providers/discovery.js";
 import { loadProductConfig, parseProductConfig, saveProductConfig } from "../productConfig.js";
 
+import { normalizeEndpoint } from "../providers/endpoint.js";
+
 const MAX_COMMAND_BYTES = 64 * 1024;
 const HEARTBEAT_MS = 25_000;
 
@@ -28,19 +30,14 @@ function contentType(filePath: string): string {
 
 /** Reject non-http(s) URLs and any URL embedding credentials. */
 function isSafeEndpointUrl(value: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(value.trim());
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  return parsed.username === "" && parsed.password === "";
+  try { normalizeEndpoint(value); return true; } catch { return false; }
 }
 
 export interface LatticeServer {
   readonly url: string;
   readonly port: number;
+  // Private owner channel only; never serialized by an HTTP route.
+  readonly bootstrapCookie: string;
   close(): Promise<void>;
 }
 
@@ -51,6 +48,7 @@ export interface ServeOptions {
   assetRoot?: string;
   /** Device-global product config directory. Absent: config endpoints answer 503. */
   dataDir?: string;
+  privateBootstrap?: boolean;
 }
 
 function defaultAssetRoot(): string {
@@ -110,13 +108,28 @@ function parseCommand(body: string): UiCommand {
 }
 
 export async function serveLattice(options: ServeOptions): Promise<LatticeServer> {
-  const sessions: SessionStore = createSessionStore();
   const tasks = new TaskManager(options.db, options.workspace, undefined, options.dataDir ?? null);
+  return serveLatticeWithManager({ ...options, tasks });
+}
+
+export interface ServeWithManagerOptions extends Omit<ServeOptions, "db"> {
+  db: import("node:sqlite").DatabaseSync;
+  tasks: TaskManager;
+}
+
+// Desktop seam: the same HTTP route table and SSE transport, but the
+// TaskManager (and its database handle) comes from the desktop backend
+// entry instead of being constructed here. Behavior is otherwise identical.
+export async function serveLatticeWithManager(options: ServeWithManagerOptions): Promise<LatticeServer> {
+  const sessions: SessionStore = createSessionStore();
+  const tasks = options.tasks;
   const assetRoot = options.assetRoot ?? defaultAssetRoot();
   const streams = new Set<http.ServerResponse>();
+  const bootstrapCookie = sessionCookieHeader(sessions.issue());
+  let origin = "";
 
   const server = http.createServer((request, response) => {
-    void handle(request, response, sessions, tasks, assetRoot, streams).catch((error: unknown) => {
+    void handle(request, response, sessions, tasks, assetRoot, streams, origin, options.privateBootstrap === true).catch((error: unknown) => {
       if (!response.headersSent) {
         response.writeHead(500, { "Content-Type": "application/json" });
       }
@@ -136,10 +149,14 @@ export async function serveLattice(options: ServeOptions): Promise<LatticeServer
       else reject(new Error("could not determine loopback port"));
     });
   });
+  origin = `http://127.0.0.1:${port}`;
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: origin,
     port,
-    close: () =>
+    bootstrapCookie,
+    close: async () => {
+      await tasks.close();
+      return (
       new Promise<void>((resolve, reject) => {
         for (const stream of streams) {
           try {
@@ -153,7 +170,8 @@ export async function serveLattice(options: ServeOptions): Promise<LatticeServer
           if (error !== undefined) reject(error);
           else resolve();
         });
-      }),
+      }));
+    },
   };
 }
 
@@ -164,17 +182,33 @@ async function handle(
   tasks: TaskManager,
   assetRoot: string,
   streams: Set<http.ServerResponse>,
+  origin: string,
+  privateBootstrap: boolean,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
-  if (!checkHost(request.headers.host)) {
+  response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  if (!checkHost(request.headers.host, new URL(origin).host)) {
     response.writeHead(400, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ error: "unexpected Host" }));
+    return;
+  }
+  if (!checkOrigin(request.headers.origin, origin)) {
+    response.writeHead(403, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "foreign origin rejected" }));
     return;
   }
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     const hasSession = sessions.check(request.headers.cookie);
     const headers: Record<string, string> = { "Content-Type": "text/html; charset=utf-8" };
     if (!hasSession) {
+      const directNavigation = request.headers["sec-fetch-site"] === "none" && request.headers["sec-fetch-mode"] === "navigate" && request.headers["sec-fetch-dest"] === "document";
+      if (privateBootstrap || !directNavigation) {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "session bootstrap requires the application owner or a direct browser navigation" }));
+        return;
+      }
       headers["Set-Cookie"] = sessionCookieHeader(sessions.issue());
     }
     response.writeHead(200, headers);
@@ -237,7 +271,7 @@ async function handle(
       protocol: PROTOCOL_VERSION,
       status: [...listPresets().map((preset) => preset.id), "custom"].map((id) => ({
         id,
-        keyConfigured: tasks.keyConfigured(id),
+        keyConfigured: tasks.keyConfigured(id, url.searchParams.get("provider") === id ? url.searchParams.get("baseUrl") : null),
       })),
     }));
     return;
@@ -291,7 +325,7 @@ async function handle(
     }
     let apiKey = "";
     try {
-      apiKey = tasks.providerApiKey(providerId);
+      apiKey = tasks.providerApiKey(providerId, effectiveBase);
     } catch {
       response.writeHead(400, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: "unknown provider preset" }));
@@ -492,7 +526,8 @@ function streamEvents(
   const after = Number.isInteger(lastId) ? lastId : 0;
   const missed = tasks.missedEvents(taskId, after);
   if (missed.resync) {
-    send(after, JSON.stringify({ seq: after, kind: "resync", cut: after }));
+    const cut = tasks.snapshot(taskId).cut;
+    send(cut, JSON.stringify({ seq: cut, kind: "resync", cut }));
   } else {
     for (const event of missed.events) send(event.seq, JSON.stringify(event));
   }
@@ -510,11 +545,13 @@ function streamEvents(
   const subscriber = (event: import("./protocol.js").UiEvent): void => {
     if (!send(event.seq, JSON.stringify(event))) {
       closer();
+      response.destroy();
       return;
     }
     if (response.writableLength > 256 * 1024) {
       send(event.seq, JSON.stringify({ seq: event.seq, kind: "resync", cut: event.seq }));
       closer();
+      response.destroy();
     }
   };
   tasks.subscribe(taskId, subscriber);

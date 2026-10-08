@@ -1,3 +1,4 @@
+import { normalizeEndpoint, requireCredentialTransport, containsCredential } from "./endpoint.js";
 // Model discovery and connection testing over OpenAI-compatible endpoints.
 //
 // Both operations are GET {baseUrl}/models with no request body, no model
@@ -57,10 +58,9 @@ function normalizeModels(payload: unknown): DiscoveredModel[] | null {
  * (local endpoints may need none). One HTTP send, no retries, no fallback.
  */
 export async function listModels(options: DiscoveryOptions): Promise<DiscoveryOutcome> {
-  const base = options.baseUrl.trim().replace(/\/+$/, "");
-  if (base === "") {
-    return { ok: false, kind: "invalid", detail: "base URL is empty" };
-  }
+  let base: string;
+  try { base = normalizeEndpoint(options.baseUrl); requireCredentialTransport(base, options.apiKey ?? ""); }
+  catch { return { ok: false, kind: "invalid", detail: "invalid endpoint or credential transport" }; }
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const state = { timedOut: false };
@@ -73,6 +73,7 @@ export async function listModels(options: DiscoveryOptions): Promise<DiscoveryOu
     try {
       response = await fetchImpl(`${base}/models`, {
         method: "GET",
+        redirect: "error",
         headers: {
           ...(options.apiKey !== undefined && options.apiKey.trim() !== "" ? { Authorization: `Bearer ${options.apiKey}` } : {}),
         },
@@ -82,7 +83,7 @@ export async function listModels(options: DiscoveryOptions): Promise<DiscoveryOu
       if (state.timedOut || (error instanceof Error && error.name === "AbortError")) {
         return { ok: false, kind: "timeout", detail: `models request timed out` };
       }
-      return { ok: false, kind: "network", detail: error instanceof Error ? error.message : "network failure" };
+      return { ok: false, kind: "network", detail: "models request failed" };
     }
     if (response.status === 401 || response.status === 403) {
       return { ok: false, kind: "auth", detail: `endpoint denied the credential (http ${response.status})` };
@@ -99,6 +100,7 @@ export async function listModels(options: DiscoveryOptions): Promise<DiscoveryOu
     } catch {
       return { ok: false, kind: "partial", detail: "endpoint answered with a non-JSON body" };
     }
+    if (containsCredential(payload, options.apiKey ?? "")) return { ok: false, kind: "invalid", detail: "endpoint returned credential-bearing metadata" };
     const models = normalizeModels(payload);
     if (models === null) {
       return { ok: false, kind: "partial", detail: "endpoint answered without a model data array" };

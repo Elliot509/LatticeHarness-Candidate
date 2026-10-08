@@ -46,7 +46,7 @@ function isBinary(buffer: Buffer): boolean {
   return buffer.includes(0);
 }
 
-function* walkFiles(root: string, errors: string[]): Generator<string> {
+function* walkFiles(root: string, errors: string[], includeDirectories = false): Generator<string> {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
@@ -59,7 +59,10 @@ function* walkFiles(root: string, errors: string[]): Generator<string> {
     const full = path.join(root, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      if (!IGNORED_DIRS.has(entry.name)) yield* walkFiles(full, errors);
+      if (!IGNORED_DIRS.has(entry.name)) {
+        if (includeDirectories) yield full;
+        yield* walkFiles(full, errors, includeDirectories);
+      }
     } else if (entry.isFile()) {
       yield full;
     }
@@ -102,7 +105,7 @@ export class SearchTool implements Tool<SearchArgs> {
     let filesSkipped = 0;
     let complete = true;
 
-    for (const file of walkFiles(scopeRoot, errors)) {
+    for (const file of walkFiles(scopeRoot, errors, rawArgs.kind === "path")) {
       if (filesScanned >= maxFiles) {
         complete = false;
         break;
@@ -111,7 +114,7 @@ export class SearchTool implements Tool<SearchArgs> {
       const relative = path.relative(scopeRoot, file);
       if (rawArgs.kind === "path") {
         if (relative.includes(rawArgs.query)) {
-          matches.push({ file: relative, line: 0, text: relative });
+          matches.push({ file: relative, line: 0, text: fs.statSync(file).isDirectory() ? `${relative}/ [directory]` : relative });
           if (matches.length >= maxMatches) {
             complete = false;
             break;
@@ -159,12 +162,14 @@ export class SearchTool implements Tool<SearchArgs> {
     const canonicalWorkspace = resolveInScope(context.workspaceRoot, ".") ?? path.resolve(context.workspaceRoot);
     const scopeNote = `scope ${path.relative(canonicalWorkspace, scopeRoot) === "" ? "." : path.relative(canonicalWorkspace, scopeRoot)}, ${filesScanned} files read, ${filesSkipped} skipped (binary/oversize/unreadable), ignored: ${[...IGNORED_DIRS].join(",")}`;
     const errorNote = errors.length > 0 ? ` errors: ${errors.join(" | ")}` : "";
+    if (errors.length > 0 || filesSkipped > 0) complete = false;
     if (complete) {
       return {
         status: "completed",
         summary: `${matches.length} match(es). ${scopeNote}.${errorNote}`,
         detail: matches.map((m) => `${m.file}:${m.line}:${m.text}`).join("\n"),
         complete: true,
+        truncationNote: "Coverage is limited to the reported scope and exclusions; global absence is not certified.",
       };
     }
     const full = matches.map((m) => `${m.file}:${m.line}:${m.text}`).join("\n");

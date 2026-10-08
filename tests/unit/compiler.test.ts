@@ -58,9 +58,7 @@ describe("context compiler", () => {
     expect(surface.evidenceIncluded).toBeLessThan(3);
     expect(surface.evidenceOmitted).toBeGreaterThan(0);
     expect(surface.task).toContain("omitidos por limite");
-    for (const id of surface.omittedIds) {
-      expect(surface.task).toContain(id);
-    }
+    expect(surface.system.length + surface.task.length).toBeLessThanOrEqual(2000);
     expect(surface.task).toContain("[keep]");
   });
 

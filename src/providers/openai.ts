@@ -1,3 +1,4 @@
+import { normalizeEndpoint, requireCredentialTransport, containsCredential } from "./endpoint.js";
 import {
   ProviderError,
   type ModelRequest,
@@ -5,7 +6,7 @@ import {
   type ProviderAdapter,
 } from "./types.js";
 
-export const OPENAI_ADAPTER_REVISION = "openai-chat-completions-1";
+export const OPENAI_ADAPTER_REVISION = "openai-chat-completions-3";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
 export interface OpenAiAdapterOptions {
@@ -33,6 +34,17 @@ interface ChatCompletionsResponse {
     prompt_tokens?: unknown;
     completion_tokens?: unknown;
     total_tokens?: unknown;
+    // Present on OpenAI Chat Completions responses when prompt caching is in
+    // play, and always present (normalized) on OpenRouter Chat Completions
+    // responses. Both vendors define prompt_tokens as the INCLUSIVE input
+    // total: cached + written + ordinary input (see OpenAI prompt-caching
+    // guide "ordinary_input_tokens = input_tokens - cached - cache_write",
+    // OpenRouter ResponseUsage docs, openai-python PromptTokensDetails).
+    // Absent details object = convention unknown (never zero-filled).
+    prompt_tokens_details?: {
+      cached_tokens?: unknown;
+      cache_write_tokens?: unknown;
+    } | null;
     completion_tokens_details?: { reasoning_tokens?: unknown };
   } | null;
 }
@@ -46,6 +58,10 @@ function errorKind(status: number): { kind: "auth" | "rate-limited" | "server-er
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function asCountOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 // Adapter for the OpenAI Chat Completions API (POST /chat/completions),
@@ -64,7 +80,8 @@ export class OpenAiAdapter implements ProviderAdapter {
 
   constructor(options: OpenAiAdapterOptions) {
     this.apiKey = options.apiKey;
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.baseUrl = normalizeEndpoint(options.baseUrl ?? DEFAULT_BASE_URL);
+    requireCredentialTransport(this.baseUrl, this.apiKey);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
   }
@@ -88,6 +105,7 @@ export class OpenAiAdapter implements ProviderAdapter {
       try {
         httpResponse = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
           method: "POST",
+          redirect: "error",
           headers: {
             "Content-Type": "application/json",
             ...(this.apiKey.trim() !== "" ? { Authorization: `Bearer ${this.apiKey}` } : {}),
@@ -119,7 +137,7 @@ export class OpenAiAdapter implements ProviderAdapter {
           }),
           signal: controller.signal,
         });
-      } catch (error) {
+      } catch {
         if (controller.signal.aborted) {
           throw new ProviderError(
             state.timedOut ? "timeout" : "aborted",
@@ -127,40 +145,26 @@ export class OpenAiAdapter implements ProviderAdapter {
             state.timedOut,
           );
         }
-        throw new ProviderError("network", `OpenAI request failed: ${messageOf(error)}`, true);
+        throw new ProviderError("network", "Provider network request failed", true);
       }
       if (!httpResponse.ok) {
         const { kind, retryable } = errorKind(httpResponse.status);
         throw new ProviderError(
           kind,
-          `OpenAI request failed with status ${httpResponse.status}: ${await safeErrorText(httpResponse)}`,
+          `Provider request failed with status ${httpResponse.status}`,
           retryable,
           httpResponse.status,
         );
       }
-      const body = (await httpResponse.json()) as ChatCompletionsResponse;
+      let body: ChatCompletionsResponse;
+      try { body = (await httpResponse.json()) as ChatCompletionsResponse; }
+      catch { throw new ProviderError("unknown", "Provider returned invalid JSON", false); }
+      if (containsCredential(body, this.apiKey)) throw new ProviderError("unknown", "Provider response contained a credential; output withheld", false);
       return normalizeResponse(body);
     } finally {
       clearTimeout(timeout);
       request.signal?.removeEventListener("abort", onCallerAbort);
     }
-  }
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
-}
-
-async function safeErrorText(response: Response): Promise<string> {
-  try {
-    const text = await response.text();
-    const parsed = asRecord(JSON.parse(text));
-    const inner = parsed !== null ? asRecord(parsed["error"]) : null;
-    const message = inner !== null ? inner["message"] : undefined;
-    if (typeof message === "string" && message.length > 0) return message.slice(0, 500);
-    return text.slice(0, 500);
-  } catch {
-    return "unreadable error body";
   }
 }
 
@@ -194,6 +198,21 @@ function normalizeResponse(body: ChatCompletionsResponse): ModelResponse {
     typeof usage?.completion_tokens_details?.reasoning_tokens === "number"
       ? usage.completion_tokens_details.reasoning_tokens
       : undefined;
+  // Cache partitions are provider-declared here, at the wire boundary, and
+  // nowhere else. prompt_tokens is the INCLUSIVE input total per both
+  // vendors; the details object (when present and valid) partitions it.
+  // Only VALID counts (non-negative integers; explicit zero counts) become
+  // known quantities. Absent, mistyped, or negative fields prove nothing
+  // about caching, so the partitions stay absent (UNKNOWN downstream)
+  // rather than becoming zero. The inclusive-input convention is declared
+  // only when BOTH partitions are valid: declaring it on partial evidence
+  // would let telemetry derive the missing partition as zero
+  // (usage.ts `?? 0`), fabricating precision. Partial evidence therefore
+  // keeps the convention undeclared and the window fail-closed.
+  const details = asRecord(usage?.prompt_tokens_details);
+  const cachedTokens = details !== null ? asCountOrUndefined(details["cached_tokens"]) : undefined;
+  const cacheWriteTokens = details !== null ? asCountOrUndefined(details["cache_write_tokens"]) : undefined;
+  const hasFullCacheEvidence = cachedTokens !== undefined && cacheWriteTokens !== undefined;
   return {
     text: typeof message.content === "string" ? message.content : "",
     toolCalls,
@@ -204,6 +223,12 @@ function normalizeResponse(body: ChatCompletionsResponse): ModelResponse {
             inputTokens: usage.prompt_tokens,
             outputTokens: usage.completion_tokens,
             totalTokens: usage.total_tokens,
+            ...(cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {}),
+            ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+            // The inclusive-input convention is declared only on full valid
+            // cache evidence; otherwise it stays unknown and telemetry keeps
+            // the partitions UNKNOWN (fail-closed).
+            ...(hasFullCacheEvidence ? { inclusiveInput: true as const } : {}),
             ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
           },
     modelResolved: typeof body.model === "string" ? body.model : null,

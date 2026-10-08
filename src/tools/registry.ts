@@ -99,7 +99,12 @@ export function buildToolset(options: ToolsetOptions = {}): RegisteredToolEntry[
         if (supervisor === undefined) {
           throw new Error("process tool requires a supervisor for this run");
         }
-        const args = decodeArgs(argsJson) as unknown as ProcessOperation;
+        const requested = decodeArgs(argsJson) as unknown as ProcessOperation;
+        // Executor identity comes from the claimed runtime context, never
+        // model-supplied generation/realm/attempt metadata.
+        const args: ProcessOperation = requested.op === "spawn"
+          ? { ...requested, generation: context.ownerGeneration ?? requested.generation, realm: context.realm, attemptId: context.attemptId ?? requested.attemptId }
+          : { ...requested, generation: context.ownerGeneration ?? requested.generation };
         // The tool-context overlay authorizes extra child env for this
         // dispatch only; merge it into the per-spawn args env explicitly so
         // the supervisor boundary stays the single choke point.

@@ -480,7 +480,8 @@ describe("orphan processes are quarantined, never adopted", () => {
 
     const second = track(openLatticeDb(path.join(root, "data")));
     const report = evaluateResumeGate(second.raw, { taskId: "task-orphan", generation: 2, packageVersion: "0.0.0" });
-    expect(report.canResume).toBe(true);
+    expect(report.canResume).toBe(false);
+    expect(report.blockers.some((entry) => entry.code === "unknown-effects")).toBe(true);
     expect(report.unknowns.map((entry) => entry.attemptId)).toEqual([admitted.attemptId]);
     // A fresh generation never adopts the old handle, and never claims the
     // tree dead: the stale handle is refused via errorKind, the process untouched.

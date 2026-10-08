@@ -49,8 +49,10 @@ describe("config validation", () => {
 
   it("loads defaults and reports provider pending", () => {
     const config = loadConfig({ dataDir: "/abs/data", workspace: "/abs/ws" });
-    expect(config.maxModelAttempts).toBe(50);
-    expect(config.maxTotalTokens).toBe(200000);
+    expect(config.maxModelAttempts).toBeNull();
+    expect(config.maxTotalTokens).toBeNull();
+    expect(config.taskExpiryMs).toBeNull();
+    expect(validateConfig(config)).toEqual([]);
     expect(providerReadiness(config)).toBe("provider-pending");
   });
 

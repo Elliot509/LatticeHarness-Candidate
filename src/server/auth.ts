@@ -45,14 +45,15 @@ function loopbackHost(host: string): boolean {
 }
 
 // Rejects DNS-rebinding and foreign hosts: only loopback Host values pass.
-export function checkHost(hostHeader: string | string[] | undefined): boolean {
+export function checkHost(hostHeader: string | string[] | undefined, expectedHost?: string): boolean {
   if (typeof hostHeader !== "string") return false;
+  if (expectedHost !== undefined) return hostHeader.toLowerCase() === expectedHost.toLowerCase();
   return loopbackHost(hostHeader.trim().toLowerCase());
 }
 
 // POSTs must come from the loopback UI itself (or have no Origin, as with
 // curl). Anything else is treated as a foreign origin and rejected.
-export function checkOrigin(origin: string | string[] | undefined): boolean {
+export function checkOrigin(origin: string | string[] | undefined, expectedOrigin?: string): boolean {
   if (origin === undefined) return true;
   if (typeof origin !== "string") return false;
   let url: URL;
@@ -62,5 +63,6 @@ export function checkOrigin(origin: string | string[] | undefined): boolean {
     return false;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (expectedOrigin !== undefined) return url.origin === expectedOrigin && origin === url.origin;
   return loopbackHost(url.host.toLowerCase());
 }

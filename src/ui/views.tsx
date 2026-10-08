@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { desktopBridge } from "./desktop.js";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { JSX, KeyboardEvent } from "react";
 import type {
   ApiClient,
@@ -247,16 +248,10 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
   // Initialized from the task route when the dialog opens (single source of
   // truth: the route's provider/model). The useState default is only the
   // pre-open placeholder; openConfig syncs it to the live route below.
-  const [provider, setProvider] = useState("openai");
-  const [model, setModel] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [key, setKey] = useState("");
   const [notice, setNotice] = useState("");
   const modelButtonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const configWasOpenRef = useRef(false);
-  const taskRef = useRef(task);
-  taskRef.current = task;
 
   useEffect(() => {
     if (configOpen) {
@@ -265,11 +260,6 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
       // time it opens (PR1-002): the route is the single source of truth, so
       // a task created under openrouter never offers an openai-preselected
       // key slot. User edits after opening are preserved (no sync while open).
-      const route = taskRef.current;
-      if (route !== null) {
-        setProvider(route.provider);
-        setModel(route.model);
-      }
       const first = panelRef.current?.querySelector("input, select");
       if (first instanceof HTMLElement) first.focus();
     } else if (configWasOpenRef.current) {
@@ -278,39 +268,14 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
     }
   }, [configOpen]);
 
-  async function applyModel(): Promise<void> {
-    if (task === null || model.trim() === "") return;
-    const commandId = createCommandId();
-    setNotice("Troca de modelo enviada; aguardando o core aplicar.");
+  async function applyModel(pick: ModelPick): Promise<void> {
+    if (task === null) return;
+    setNotice("Aplicando seleção no próximo pedido…");
     try {
-      const result = await api.command({
-        commandId,
-        kind: "select-model",
-        taskId: task.taskId,
-        payload: { provider, model: model.trim(), ...(baseUrl.trim() !== "" ? { baseUrl: baseUrl.trim() } : { baseUrl: null }) },
-      });
-      if (!result.accepted) {
-        setNotice(`Troca não aplicada (${result.reason}). Interrompa a tarefa ou configure a credencial.`);
-      } else {
-        setNotice("Troca aceita; vale a partir do próximo ponto seguro.");
-      }
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "falha ao trocar de modelo");
-    }
-  }
-
-  async function saveKey(): Promise<void> {
-    if (key.trim() === "") return;
-    try {
-      // Single source of truth: the task route's provider selects the key
-      // slot. The Header never invents its own provider universe (R1 F-0006:
-      // the hardcoded "openai" slot is gone); Settings stays configuration.
-      await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider, key } });
-      setKey("");
-      setNotice("Chave recebida pelo servidor local (só em memória, nunca exibida de novo).");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "falha ao salvar a chave");
-    }
+      const result = await api.command({ commandId: createCommandId(), kind: "select-model", taskId: task.taskId,
+        payload: { provider: pick.providerId, model: pick.model, baseUrl: pick.baseUrl } });
+      setNotice(result.accepted ? "Seleção aceita; o modelo ativo muda quando o próximo pedido for vinculado." : `Seleção recusada (${result.reason}). Confira a conexão.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Falha ao selecionar modelo."); }
   }
 
   return (
@@ -330,11 +295,18 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
       </div>
       <div className="topbar-side">
         {task !== null && (
-          <span className="budgettag" title="Chamadas e tokens liquidados e reservados dentro da concessão da tarefa">
-            <span>{task.budget.settledCalls + task.budget.reservedCalls}/{task.budget.grantedCalls}</span> chamadas
-            <span className="budget-separator" aria-hidden="true">·</span>
-            <span>{formatTokens(task.budget.settledTokens + task.budget.reservedTokens)}/{formatTokens(task.budget.grantedTokens)}</span> tokens
-          </span>
+          <details className="budgettag">
+            <summary>{task.budget.settledCalls} chamadas · {formatTokens(task.budget.settledTokens)} tokens observados</summary>
+            <div className="budget-detail">
+              <strong>Consumo acumulado da tarefa</strong>
+              <span>Observado e liquidado: {task.budget.settledCalls} chamadas · {formatTokens(task.budget.settledTokens)} tokens</span>
+              <span>Reservado: {task.budget.reservedCalls} chamadas · {formatTokens(task.budget.reservedTokens)} tokens</span>
+              <span>Uso incompleto: {task.budget.uncertainUsageAttempts ?? 0} tentativas · reserva é estimativa, não teto do consumo incerto</span>
+              <span>Limite de chamadas: {task.budget.grantedCalls ?? "sem limite configurado"}</span>
+              <span>Limite de tokens: {task.budget.grantedTokens === null ? "sem limite configurado" : formatTokens(task.budget.grantedTokens)}</span>
+              <span>Contexto e custo: não informados. O provedor pode cobrar pelo uso.</span>
+            </div>
+          </details>
         )}
         {task !== null && (
           <span className="contexttag" title="Uso de contexto informado pelo core">
@@ -381,36 +353,9 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
                   </div>
                   <button type="button" className="btn icon" aria-label="Fechar configuração do modelo" onClick={() => { setConfigOpen(false); }}>×</button>
                 </div>
-                <label>
-                  Provedor
-                  <select value={provider} onChange={(event) => { setProvider(event.target.value); }} aria-label="Provedor">
-                    <option value="openai">OpenAI</option>
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="gemini">Google AI Studio</option>
-                    <option value="abacus">Abacus RouteLLM</option>
-                    <option value="local">Local</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </label>
-                <label>
-                  Modelo
-                  <input value={model} onChange={(event) => { setModel(event.target.value); }} placeholder={task.model} aria-label="Modelo" />
-                </label>
-                <label>
-                  URL base
-                  <input value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); }} placeholder="http://127.0.0.1:8080/v1" aria-label="URL base" />
-                </label>
-                <div className="modelconfig-action">
-                  <button type="button" className="btn primary" disabled={model.trim() === ""} onClick={() => { void applyModel(); }}>Aplicar modelo</button>
-                </div>
-                <div className="config-separator" />
-                <label>
-                  Chave de API <span>{task.keyConfigured ? "configurada" : "não configurada"}</span>
-                  <input type="password" value={key} onChange={(event) => { setKey(event.target.value); }} autoComplete="off" aria-label="Chave de API" />
-                </label>
-                <div className="modelconfig-action">
-                  <button type="button" className="btn" disabled={key.trim() === ""} onClick={() => { void saveKey(); }}>Salvar em memória</button>
-                </div>
+                <p className="meta">Ativo: {task.provider}/{task.model}</p>
+                {task.pendingModel && <p className="notice" role="status">Selecionado: {task.pendingModel.provider}/{task.pendingModel.model} · aguardando próximo pedido</p>}
+                <ModelPicker api={api} providerId={task.provider} model={task.model} baseUrl={task.baseUrl ?? ""} onPick={(pick) => { void applyModel(pick); }} />
                 {notice !== "" && <p className="notice" role="status">{notice}</p>}
               </div>
             )}
@@ -615,14 +560,14 @@ function VerificationRow({ verification }: { verification: VerificationView }): 
   const outcome = verification.exitCode === null
     ? "resultado incerto"
     : verification.exitCode === 0
-      ? "passou"
+      ? verification.countsKnown && (verification.failed ?? 1) === 0 && (verification.passed ?? 0) > 0 ? "testes passaram" : "comando terminou · critério não verificado"
       : `falhou com saída ${verification.exitCode}`;
   return (
     <div className="verification-row">
       <time className="eventtime" dateTime={verification.recordedAt}>{shortTime(verification.recordedAt)}</time>
       <span className={`statusmark ${verification.exitCode === 0 ? "statusmark-completed" : "statusmark-failed"}`} aria-hidden="true" />
       <div className="verification-main">
-        <span className="verification-label">verificação</span>
+        <span className="verification-label">{verification.countsKnown ? "testes observados" : "execução observada"}</span>
         <code title={verification.command}>{verification.command}</code>
         <span className="verification-counts">
           {verification.countsKnown
@@ -659,6 +604,7 @@ function SteeringRow({ steering }: { steering: SteeringView }): JSX.Element {
 
 function TaskNotices({ task }: { task: TaskSnapshot }): JSX.Element | null {
   const description = taskStateDescription(task);
+  const blockers = task.state === "COMPLETED" || task.state === "CANCELLED" || task.state === "RUNNING" ? [] : task.resumeBlockers.filter(blocker => blocker !== "terminal-state");
   if (description === "" && task.waits.length === 0 && task.unknowns === 0 && task.resumeBlockers.length === 0) return null;
   return (
     <section className={`task-notices task-notices-${task.state.toLowerCase().replace("_", "-")}`} aria-label="Estado da execução">
@@ -691,7 +637,7 @@ function TaskNotices({ task }: { task: TaskSnapshot }): JSX.Element | null {
           <code>{unknown.attemptId}</code>
         </div>
       ))}
-      {task.resumeBlockers.map((blocker, index) => (
+      {blockers.map((blocker, index) => (
         <div key={`${index}-${blocker}`} className="notice-row">
           <span>Bloqueio de retomada</span>
           <p>{blocker}</p>
@@ -701,15 +647,38 @@ function TaskNotices({ task }: { task: TaskSnapshot }): JSX.Element | null {
   );
 }
 
+const chatPositions = new Map<string, { top: number; following: boolean }>();
+
 export function Chat({ state, dispatch }: ChatProps): JSX.Element {
   const chatRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
+  const followingRef = useRef(true);
   const task = state.task;
   const activity = task === null ? [] : taskActivity(task);
-
+  const groups: Array<typeof activity> = [];
+  for (const item of activity) {
+    const last = groups.at(-1);
+    const previous = last?.at(-1);
+    if (item.kind === "tool" && item.value.status === "completed" && ["read", "search"].includes(item.value.tool) && previous?.kind === "tool" && previous.value.status === "completed" && previous.value.tool === item.value.tool) last?.push(item);
+    else groups.push([item]);
+  }
+  const renderActivity = (item: typeof activity[number]): JSX.Element => {
+    switch (item.kind) {
+      case "message": return <MessageRow key={`message-${item.value.id}`} message={item.value} />;
+      case "tool": return <ToolRow key={`tool-${item.value.id}`} tool={item.value} open={state.detailId === item.value.id} onOpen={() => { dispatch({ type: "select-detail", detailId: state.detailId === item.value.id ? null : item.value.id }); }} />;
+      case "verification": return <VerificationRow key={`verification-${item.value.id}`} verification={item.value} />;
+      case "steering": return <SteeringRow key={`steering-${item.value.id}`} steering={item.value} />;
+    }
+  };
+  useLayoutEffect(() => {
+    const saved = task === null ? undefined : chatPositions.get(task.taskId);
+    followingRef.current = saved?.following ?? true;
+    setFollowing(followingRef.current);
+    if (chatRef.current !== null && saved !== undefined) chatRef.current.scrollTop = saved.top;
+  }, [task?.taskId]);
   useEffect(() => {
-    if (following) bottomRef.current?.scrollIntoView({ block: "nearest" });
+    if (followingRef.current) bottomRef.current?.scrollIntoView({ block: "nearest" });
   }, [following, task?.cut]);
 
   if (task === null) return <div className="chat" aria-live="off" />;
@@ -722,9 +691,18 @@ export function Chat({ state, dispatch }: ChatProps): JSX.Element {
         onScroll={() => {
           const node = chatRef.current;
           if (node === null) return;
-          setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 48);
+          const nextFollowing = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+          followingRef.current = nextFollowing;
+          setFollowing(nextFollowing);
+          chatPositions.set(task.taskId, { top: node.scrollTop, following: nextFollowing });
+          if (chatPositions.size > 64) chatPositions.delete(chatPositions.keys().next().value ?? "");
         }}
       >
+        <details className="objective-panel" open>
+          <summary>Objetivo</summary>
+          <p>{task.objective}</p>
+          <span className="meta">Critérios: {task.acceptanceCriteria.join(" · ")}</span>
+        </details>
         <TaskNotices task={task} />
         <div className="timeline-head">
           <h2>Execução</h2>
@@ -742,25 +720,12 @@ export function Chat({ state, dispatch }: ChatProps): JSX.Element {
             <span>Eventos do runtime aparecem aqui.</span>
           </div>
         )}
-        {activity.map((item) => {
-          switch (item.kind) {
-            case "message":
-              return <MessageRow key={`message-${item.value.id}`} message={item.value} />;
-            case "tool":
-              return (
-                <ToolRow
-                  key={`tool-${item.value.id}`}
-                  tool={item.value}
-                  open={state.detailId === item.value.id}
-                  onOpen={() => { dispatch({ type: "select-detail", detailId: state.detailId === item.value.id ? null : item.value.id }); }}
-                />
-              );
-            case "verification":
-              return <VerificationRow key={`verification-${item.value.id}`} verification={item.value} />;
-            case "steering":
-              return <SteeringRow key={`steering-${item.value.id}`} steering={item.value} />;
-          }
-        })}
+        {groups.map(group => group.length === 1 ? group.map(renderActivity) : (
+          <details className="activity-group" key={group[0]?.value.id}>
+            <summary>{group.length} observações de {group[0]?.kind === "tool" ? group[0].value.tool : "atividade"}</summary>
+            {group.map(renderActivity)}
+          </details>
+        ))}
         <div ref={bottomRef} />
       </div>
       {!following && (
@@ -769,6 +734,7 @@ export function Chat({ state, dispatch }: ChatProps): JSX.Element {
           className="btn jump-latest"
           onClick={() => {
             setFollowing(true);
+            followingRef.current = true;
             bottomRef.current?.scrollIntoView({ block: "nearest" });
           }}
         >
@@ -891,7 +857,7 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
 
   async function send(): Promise<void> {
     const text = state.draft.trim();
-    if (task === null || text === "" || sending || composing) return;
+    if (task === null || task.state === "COMPLETED" || task.state === "CANCELLED" || text === "" || sending || composing) return;
     setSending(true);
     const commandId = createCommandId();
     dispatch({ type: "command-sent", command: { commandId, kind: "steer", text, sentAt: Date.now() } });
@@ -905,22 +871,27 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
         payload: { text, mode: "guide" },
       });
       if (!result.accepted) {
-        dispatch({ type: "draft", draft: text });
+        dispatch({ type: "task-draft", taskId: task.taskId, draft: text });
+        dispatch({ type: "command-failed", taskId: task.taskId, commandId, error: "A orientação foi recusada pelo runtime. Seu rascunho foi preservado." });
       }
     } catch {
-      dispatch({ type: "draft", draft: text });
+      dispatch({ type: "task-draft", taskId: task.taskId, draft: text });
+      dispatch({ type: "command-failed", taskId: task.taskId, commandId, error: "Não foi possível confirmar o envio. Confira o histórico antes de reenviar; seu rascunho foi preservado." });
     } finally {
       setSending(false);
     }
   }
 
   async function stop(): Promise<void> {
-    if (task === null || task.state !== "RUNNING" || sending) return;
+    if (task === null || (task.state !== "RUNNING" && task.state !== "WAITING") || sending) return;
     setSending(true);
     try {
       const commandId = createCommandId();
       dispatch({ type: "command-sent", command: { commandId, kind: "stop", text: "stop requested", sentAt: Date.now() } });
-      await api.command({ commandId, kind: "stop", taskId: task.taskId });
+      const result = await api.command({ commandId, kind: "stop", taskId: task.taskId });
+      if (!result.accepted) setNotice("Interrupção recusada pelo core; a tarefa não tem uma execução ativa neste runtime.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "falha ao interromper");
     } finally {
       setSending(false);
     }
@@ -975,7 +946,7 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
         />
         <div className="composer-actions">
           <span className="composer-state">rev {task.contractRevision} · {stateLabel(task.state)}</span>
-          {task.state === "RUNNING" && (
+          {(task.state === "RUNNING" || task.state === "WAITING") && (
             <button type="button" className="btn danger" disabled={sending} onClick={() => { void stop(); }}>
               Interromper
             </button>
@@ -985,7 +956,7 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
               Retomar
             </button>
           )}
-          <button type="button" className="btn primary" disabled={sending || state.draft.trim() === ""} onClick={() => { void send(); }}>
+          <button type="button" className="btn primary" disabled={sending || state.draft.trim() === "" || task.state === "COMPLETED" || task.state === "CANCELLED"} onClick={() => { void send(); }}>
             {sending ? "Enviando" : "Enviar"}
           </button>
         </div>
@@ -1044,6 +1015,9 @@ interface ModelPickerProps {
 
 function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = false, endpointOverride, onPick }: ModelPickerProps): JSX.Element {
   const [presets, setPresets] = useState<ProviderPresetView[]>([]);
+  const [credential, setCredential] = useState("");
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [keyNotice, setKeyNotice] = useState("");
   const [keyMap, setKeyMap] = useState<Record<string, boolean>>({});
   const [currentProvider, setCurrentProvider] = useState(providerId);
   const [manual, setManual] = useState(model);
@@ -1058,7 +1032,7 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.providers(), api.providerStatus()])
+    Promise.all([api.providers(), api.providerStatus(currentProvider, endpoint.trim() || null)])
       .then(([list, status]) => {
         if (cancelled) return;
         setPresets(list);
@@ -1072,15 +1046,31 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, currentProvider, endpoint]);
 
   const preset = presets.find((entry) => entry.id === currentProvider) ?? null;
 
   useEffect(() => {
+    setCredential("");
+    setKeyNotice("");
     discoveryRequest.current += 1;
     setDiscovery({ state: "idle", models: [], kind: "", detail: "" });
     return () => { discoveryRequest.current += 1; };
   }, [endpoint, currentProvider]);
+
+  async function saveSessionKey(): Promise<void> {
+    const key = credential;
+    setCredential("");
+    setKeyBusy(true);
+    setKeyNotice("");
+    try {
+      const result = await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider: currentProvider, baseUrl: endpoint.trim() || null, key } });
+      if (!result.accepted) throw new Error("Confira o endpoint antes de salvar a chave.");
+      setKeyMap(current => ({ ...current, [currentProvider]: true }));
+      setKeyNotice("Chave configurada nesta sessão para este endpoint.");
+    } catch (error) { setKeyNotice(error instanceof Error ? error.message : "Não foi possível configurar a chave."); }
+    finally { setKeyBusy(false); }
+  }
 
   async function discover(): Promise<void> {
     const request = ++discoveryRequest.current;
@@ -1101,6 +1091,7 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
 
   function pick(modelId: string): void {
     if (modelId.trim() === "") return;
+    if (currentProvider === "custom" && endpoint.trim() === "") { setLoadError("Informe o endpoint do provider Custom."); return; }
     onPick({ providerId: currentProvider, model: modelId.trim(), baseUrl: endpoint.trim() !== "" ? endpoint.trim() : null });
   }
 
@@ -1122,6 +1113,7 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
             aria-label="Provedor"
             onChange={(event) => {
               setCurrentProvider(event.target.value);
+              setEndpoint("");
               setDiscovery({ state: "idle", models: [], kind: "", detail: "" });
             }}
           >
@@ -1137,7 +1129,7 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
         <p className="meta">Endpoint arbitrário OpenAI-compatible. Listagem e tools dependem do servidor.</p>
       )}
       {endpointOverride === undefined && <label>
-        Endpoint (opcional)
+        Endpoint (opcional; vazio usa o padrão)
         <input
           value={endpoint}
           aria-label="Endpoint"
@@ -1145,9 +1137,15 @@ function ModelPicker({ api, providerId, model, baseUrl, hideProviderSelect = fal
           onChange={(event) => { setEndpoint(event.target.value); }}
         />
       </label>}
-      {!hideProviderSelect && preset?.keyRequired === true && keyMap[currentProvider] !== true && (
-        <p className="meta">Sem credencial configurada; a listagem pode recusar (401). Configure em Providers.</p>
-      )}
+      {!hideProviderSelect && <div className="provider-credential">
+        <p className="meta" role="status">{keyMap[currentProvider] === true ? "Chave configurada · SESSION_ONLY" : "Sem chave nesta sessão"}</p>
+        <label>Chave de API · somente nesta sessão
+          <input type="password" autoComplete="off" value={credential} aria-label="Chave de API da sessão" onChange={event => { setCredential(event.target.value); }} placeholder={preset?.keyRequired ? "Cole a chave e clique em Configurar chave" : "Opcional para endpoints locais"} />
+        </label>
+        <button type="button" className="btn" disabled={keyBusy || credential.trim() === ""} onClick={() => { void saveSessionKey(); }}>Configurar chave</button>
+        <p className="meta">A chave fica na memória até fechar o aplicativo. Será necessário inseri-la novamente ao reabrir.</p>
+        {keyNotice !== "" && <p className="meta" role="status">{keyNotice}</p>}
+      </div>}
       <div className="modelpicker-actions">
         <button type="button" className="btn" disabled={discovery.state === "loading"} onClick={() => { void discover(); }}>
           {discovery.state === "loading" ? "Consultando…" : discovery.state === "ready" ? "Atualizar modelos" : "Listar modelos"}
@@ -1266,7 +1264,11 @@ function WorkspacePicker({ api, onPick }: { api: ApiClient; onPick: (path: strin
 }
 
 export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
-  const [objective, setObjective] = useState("");
+  const objective = state.draft;
+  const setObjective = (draft: string): void => { dispatch({ type: "draft", draft }); };
+  const [callLimit, setCallLimit] = useState("");
+  const [tokenLimit, setTokenLimit] = useState("");
+  const [acceptanceCriterion, setAcceptanceCriterion] = useState("");
   const [providerId, setProviderId] = useState("openai");
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -1307,41 +1309,59 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
     }
   }
 
+  async function chooseProject(): Promise<void> {
+    const bridge = desktopBridge();
+    if (bridge === null) { setPanel(current => current === "workspace" ? null : "workspace"); return; }
+    setError("");
+    try { const selected = await bridge.selectProject(); if (selected !== null) setWorkspace(selected.workspace); }
+    catch (error) { setError(error instanceof Error ? error.message : "Não foi possível escolher o projeto."); }
+  }
+
   async function start(): Promise<void> {
     if (objective.trim() === "" || starting) return;
+    if (workspace.trim() === "") { setError("Escolha o projeto antes de iniciar a tarefa."); return; }
     if (model.trim() === "") {
       setError("Escolha o modelo antes de iniciar a tarefa.");
       setPanel("model");
       return;
     }
+    const parseLimit = (value: string): number | null => value.trim() === "" ? null : Number(value);
+    const calls = parseLimit(callLimit); const tokens = parseLimit(tokenLimit);
+    if ([calls, tokens].some(value => value !== null && (!Number.isSafeInteger(value) || value < 1))) { setError("Limites devem ser inteiros positivos ou vazios."); return; }
     setStarting(true);
     setError("");
+    let createdTaskId: string | null = null;
     try {
       const created = await api.command({
         commandId: createCommandId(),
         kind: "create-task",
-        payload: { workspace, objective: objective.trim(), provider: providerId, model: model.trim(), baseUrl: baseUrl.trim() === "" ? null : baseUrl.trim() },
+        payload: { workspace, objective: objective.trim(), acceptance: acceptanceCriterion.trim() === "" ? [] : [acceptanceCriterion.trim()], provider: providerId, model: model.trim(), baseUrl: baseUrl.trim() === "" ? null : baseUrl.trim(), budget: { calls, tokens } },
       });
       if (!created.accepted || created.taskId === "") {
         setError("A tarefa não foi aceita pelo runtime.");
         return;
       }
+      dispatch({ type: "draft", draft: "" });
+      createdTaskId = created.taskId;
+      dispatch({ type: "open-task", taskId: created.taskId });
       const started = await api.command({ commandId: createCommandId(), kind: "start-task", taskId: created.taskId });
       if (!started.accepted) {
-        setError("A tarefa foi criada, mas a execução não foi aceita.");
+        dispatch({ type: "command-failed", commandId: started.commandId, taskId: created.taskId, error: "A tarefa foi criada, mas a execução não foi aceita. O histórico foi aberto; use Retomar quando o runtime estiver disponível." });
         return;
       }
-      await saveUiDefaults(api, { providerId, model: model.trim(), baseUrl: baseUrl.trim() === "" ? null : baseUrl.trim() });
-      dispatch({ type: "open-task", taskId: created.taskId });
+      await saveUiDefaults(api, { providerId, model: model.trim(), baseUrl: baseUrl.trim() === "" ? null : baseUrl.trim() }).catch(() => {
+        dispatch({ type: "command-failed", commandId: started.commandId, taskId: created.taskId, error: "A tarefa foi iniciada, mas as preferências do modelo não foram salvas." });
+      });
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Não foi possível iniciar a tarefa.");
+      if (createdTaskId !== null) dispatch({ type: "command-failed", commandId: "start", taskId: createdTaskId, error: "A tarefa foi criada, mas o início não foi confirmado. Confira o estado retido antes de retomar." });
+      else setError(error instanceof Error ? error.message : "Não foi possível iniciar a tarefa.");
     } finally {
       setStarting(false);
     }
   }
 
   const workspaceLabel = workspace === ""
-    ? "Abrindo pasta de trabalho"
+    ? "Escolher projeto"
     : workspace.split(/[\\/]/).filter(Boolean).pop() ?? workspace;
   const recent = state.sessions.slice(0, 5);
 
@@ -1350,7 +1370,16 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
       <div className="newtask-emblem" aria-hidden="true"><span className="brandmark" /></div>
       <p className="newtask-eyebrow">Lattice Agent · Harness local</p>
       <h1 id="newtask-title">O que vamos construir?</h1>
-      <p className="newtask-subtitle">Uma tarefa, seu contexto. Do código à verificação.</p>
+      <p className="newtask-subtitle">Seu projeto, uma tarefa clara e resultados observados.</p>
+      <details className="task-limits"><summary>Critério de conclusão opcional</summary>
+        <label>Critério explícito<input value={acceptanceCriterion} onChange={event => { setAcceptanceCriterion(event.target.value); }} placeholder="directory-exists:TesteMuse" /></label>
+        <p className="meta">Vazio usa um critério conservador. Opções: directory-exists:caminho, file-exists:caminho, tests-pass ou response. Use um alvo relativo ao projeto para pedidos ambíguos.</p>
+      </details>
+      <details className="task-limits"><summary>Limites opcionais</summary>
+        <label>Chamadas de modelo<input type="number" min="1" step="1" value={callLimit} onChange={event => { setCallLimit(event.target.value); }} placeholder="Sem limite configurado" /></label>
+        <label>Tokens acumulados<input type="number" min="1" step="1" value={tokenLimit} onChange={event => { setTokenLimit(event.target.value); }} placeholder="Sem limite configurado" /></label>
+        <p className="meta">Vazio permite trabalho longo. Tokens são consumo acumulado, não janela de contexto. Reservas não garantem um teto de cobrança do provedor.</p>
+      </details>
       <div className="newtask-controls" aria-label="Contexto da nova tarefa">
         <div className="newtask-modelwrap">
           <button
@@ -1361,7 +1390,8 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
             aria-expanded={panel === "workspace"}
             aria-controls="new-task-workspace-picker"
             aria-haspopup="dialog"
-            onClick={() => { setPanel((current) => (current === "workspace" ? null : "workspace")); }}
+            aria-label="Escolher projeto"
+            onClick={() => { void chooseProject(); }}
           >
             <UiIcon name="folder" /><span className="context-key">Pasta</span>
             <span className="context-value">{workspaceLabel}</span>
@@ -1452,6 +1482,7 @@ export function NewTask({ api, state, dispatch }: NewTaskProps): JSX.Element {
           )}
         </div>
       </div>
+      {workspace !== "" && <p className="meta newtask-project-root" aria-label="Raiz do projeto">{workspace}</p>}
       <form
         className="newtask-composer"
         onSubmit={(event) => {
@@ -1540,6 +1571,7 @@ function ProviderDetail({ api, card, keyOn, isDefault, defaults, onChanged }: {
 }): JSX.Element {
   const [key, setKey] = useState("");
   const [endpoint, setEndpoint] = useState(isDefault ? defaults.baseUrl ?? card.defaultBaseUrl : card.defaultBaseUrl);
+  const [endpointKeyOn, setEndpointKeyOn] = useState(keyOn);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -1550,7 +1582,15 @@ function ProviderDetail({ api, card, keyOn, isDefault, defaults, onChanged }: {
 
   useEffect(() => () => { testRequest.current += 1; }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.providerStatus(card.id, endpoint.trim() || null).then(status => { if (!cancelled) setEndpointKeyOn(status.some(entry => entry.id === card.id && entry.keyConfigured)); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [api, card.id, endpoint, keyOn, notice]);
+
   async function changeKey(remove: boolean): Promise<void> {
+    const submittedKey = key;
+    setKey("");
     setBusy(true);
     setError("");
     setNotice("");
@@ -1561,7 +1601,7 @@ function ProviderDetail({ api, card, keyOn, isDefault, defaults, onChanged }: {
       if (remove) {
         await api.removeProviderKey(card.id);
       } else {
-        const result = await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider: card.id, key } });
+        const result = await api.command({ commandId: createCommandId(), kind: "set-key", payload: { provider: card.id, baseUrl: endpoint.trim() || null, key: submittedKey } });
         if (!result.accepted) throw new Error("O servidor não aceitou a credencial.");
       }
       setKey("");
@@ -1612,25 +1652,26 @@ function ProviderDetail({ api, card, keyOn, isDefault, defaults, onChanged }: {
         <div><h3>{card.displayName}</h3><p>{card.note}</p></div>
         {card.docsUrl !== "" && <a href={card.docsUrl} target="_blank" rel="noreferrer">Documentação ↗</a>}
       </header>
-      <details className="provider-field provider-credential" open={card.keyRequired || keyOn}>
+      <details className="provider-field provider-credential" open={card.keyRequired || endpointKeyOn}>
         <summary className="keyrow">
           <h4>Credencial {card.keyRequired ? "" : <span>opcional</span>}</h4>
-          <span className={keyOn ? "credential-state configured" : "credential-state"}>{keyOn ? "Configurada · sessão" : "Não configurada"}</span>
+          <span className={endpointKeyOn ? "credential-state configured" : "credential-state"}>{endpointKeyOn ? "Configurada · sessão" : "Não configurada"}</span>
         </summary>
         <label>
           <span className="sr-only">{card.keyLabel}</span>
-          <input type="password" value={key} onChange={(event) => { setKey(event.target.value); }} autoComplete="off" aria-label={`Chave de API ${card.displayName}`} placeholder={keyOn ? "Nova chave para substituir a atual" : card.keyRequired ? "Cole sua chave de API" : "Informe somente se o servidor exigir"} />
+          <input type="password" value={key} onChange={(event) => { setKey(event.target.value); }} autoComplete="off" aria-label={`Chave de API ${card.displayName}`} placeholder={endpointKeyOn ? "Nova chave para substituir a atual" : card.keyRequired ? "Cole sua chave de API" : "Informe somente se o servidor exigir"} />
         </label>
         <div className="provider-inline-actions">
-          <span className="meta">{card.custom ? "Credencial compartilhada pelos endpoints Custom nesta sessão." : "A chave fica apenas na memória do servidor."}</span>
-          <button type="button" className="btn" disabled={busy || key.trim() === ""} onClick={() => { void changeKey(false); }}>{keyOn ? "Substituir chave" : "Salvar chave"}</button>
-          {keyOn && <button type="button" className="btn" disabled={busy} onClick={() => { void changeKey(true); }}>Remover chave</button>}
+          <span className="meta">{card.custom ? "Credencial vinculada a este endpoint nesta sessão." : "A chave fica apenas na memória do servidor."}</span>
+          <button type="button" className="btn" disabled={busy || key.trim() === ""} onClick={() => { void changeKey(false); }}>{endpointKeyOn ? "Substituir chave" : "Salvar chave"}</button>
+          {endpointKeyOn && <button type="button" className="btn" disabled={busy} onClick={() => { void changeKey(true); }}>Remover chave</button>}
         </div>
       </details>
       <div className="provider-field">
         <label>Endpoint
           <input value={endpoint} aria-label="Endpoint do provider" placeholder={card.defaultBaseUrl} onChange={(event) => {
             setEndpoint(event.target.value);
+            setEndpointKeyOn(false);
             testRequest.current += 1;
             setTest(null);
             setTesting(false);
@@ -1903,10 +1944,10 @@ export function SettingsView({ api, state, dispatch }: SettingsProps): JSX.Eleme
                 <p className="meta">Realm <code>local-trusted</code>: ferramentas de arquivo no workspace e comandos de projeto com seus privilégios.</p>
                 <p className="meta">
                   {task !== null
-                    ? `Tarefa ativa: ${task.budget.settledCalls + task.budget.reservedCalls}/${task.budget.grantedCalls} chamadas · ${formatTokens(task.budget.settledTokens + task.budget.reservedTokens)}/${formatTokens(task.budget.grantedTokens)} tokens (dados do core).`
+                    ? `Tarefa ativa: ${task.budget.settledCalls + task.budget.reservedCalls}/${task.budget.grantedCalls ?? "sem limite configurado"} chamadas · ${formatTokens(task.budget.settledTokens + task.budget.reservedTokens)}/${task.budget.grantedTokens === null ? "sem limite configurado" : formatTokens(task.budget.grantedTokens)} tokens (dados do core).`
                     : "Abra uma tarefa para ver a concessão usada."}
                 </p>
-                <p className="meta">Validade de 30 minutos, timeout de 5 minutos por comando e concessão padrão de 50 chamadas e 200 mil tokens são fixos do servidor nesta fase.</p>
+                <p className="meta">Sem teto cumulativo nem validade implícita. Limites explícitos podem ser configurados na nova tarefa ou pela API/CLI. Comandos mantêm timeout padrão de 5 minutos; Stop interrompe a execução. Não há teto financeiro garantido.</p>
               </div>
               <div className="settings-card">
                 <h3>Retomada</h3>

@@ -16,6 +16,7 @@ export interface ActionIntent {
   provider?: string | undefined;
   model?: string | undefined;
   realm?: string | undefined;
+  additionalTargets?: readonly string[];
 }
 
 export interface AdmissionTicket {
@@ -29,6 +30,11 @@ export interface AdmissionTicket {
   // the claim revalidates that THIS grant is still vigente. Additive: older
   // tickets without a digest revalidate by operation + revision only.
   readonly grantDigest?: string | undefined;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly realm?: string;
+  readonly additionalTargets?: readonly string[];
+  readonly workspaceRoot?: string;
   claimed: boolean;
 }
 
@@ -88,6 +94,11 @@ export function admitIntent(request: AdmissionRequest): AdmissionResult {
   if (!decision.allowed) {
     return { admitted: false, reason: mapReason(decision.reason), detail: decision.detail };
   }
+  for (const target of request.intent.additionalTargets ?? []) {
+    const extra = evaluateAuthority(request.contract, { ...request.intent, target }, { ownerGeneration: request.ownerGeneration, workspaceRoot: request.workspaceRoot, now });
+    if (!extra.allowed) return { admitted: false, reason: mapReason(extra.reason), detail: extra.detail };
+    if (extra.grantDigest !== decision.grantDigest) return { admitted: false, reason: "target-not-granted", detail: "All targets must be authorized by the same grant" };
+  }
   const reservation = { calls: request.intent.maxCalls, tokens: request.intent.maxTokens };
   if (!request.ledger.canReserve(reservation)) {
     return {
@@ -108,6 +119,11 @@ export function admitIntent(request: AdmissionRequest): AdmissionResult {
       reservedTokens: reservation.tokens,
       grantDigest: decision.grantDigest,
       claimed: false,
+      ...(request.intent.provider === undefined ? {} : { provider: request.intent.provider }),
+      ...(request.intent.model === undefined ? {} : { model: request.intent.model }),
+      ...(request.intent.realm === undefined ? {} : { realm: request.intent.realm }),
+      ...(request.intent.additionalTargets === undefined ? {} : { additionalTargets: request.intent.additionalTargets }),
+      workspaceRoot: request.workspaceRoot,
     },
   };
 }
@@ -180,6 +196,14 @@ export function claimTicket(
     }
     if (ticket.grantDigest !== undefined && decision.grantDigest !== ticket.grantDigest) {
       return { claimed: false, reason: "grant-changed" };
+    }
+    for (const target of ticket.additionalTargets ?? []) {
+      const extra = evaluateAuthority(revalidation.contract, { operation: revalidation.operation, target, authorityRevision: contractRevision,
+        ...(revalidation.provider === undefined ? {} : { provider: revalidation.provider }),
+        ...(revalidation.model === undefined ? {} : { model: revalidation.model }),
+        ...(revalidation.realm === undefined ? {} : { realm: revalidation.realm }) }, { ownerGeneration, workspaceRoot: revalidation.workspaceRoot, now: revalidation.now });
+      if (!extra.allowed) return { claimed: false, reason: mapClaimReason(extra.reason) };
+      if (ticket.grantDigest !== undefined && extra.grantDigest !== ticket.grantDigest) return { claimed: false, reason: "target-not-granted" };
     }
   }
   ticket.claimed = true;

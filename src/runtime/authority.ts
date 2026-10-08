@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveInScope } from "../platform/paths.js";
 import type { Grant, TaskContract } from "./contract.js";
+import { isContractExpired } from "./contract.js";
 
 // R1 authority kernel: one central evaluator for admission AND claim.
 // AUTHORITY (machine-enforceable fields) is enforced here; GUIDANCE
@@ -58,7 +59,7 @@ function canonicalGrant(value: Grant): {
   targets: string[];
   provider: string | null;
   expiresAt: string | null;
-  limits: { maxCalls: number; maxTokens: number };
+  limits: Grant["limits"];
 } {
   return {
     subject: value.subject,
@@ -208,7 +209,7 @@ export function evaluateAuthority(
   exec: AuthorityExec,
 ): AuthorityDecision {
   const now = exec.now ?? new Date();
-  if (Date.parse(contract.expiresAt) <= now.getTime()) {
+  if (isContractExpired(contract, now)) {
     return deny("contract-expired", `Contract for task ${contract.taskId} expired at ${contract.expiresAt}`);
   }
   if (intent.authorityRevision !== contract.revision) {

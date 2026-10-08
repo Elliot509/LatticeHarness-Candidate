@@ -11,13 +11,26 @@
     "lattice": "./dist/cli/main.js"
   },
   "files": [
-    "dist",
+    "dist/cli",
+    "dist/config.js",
+    "dist/context",
+    "dist/desktop",
+    "dist/platform",
+    "dist/productConfig.js",
+    "dist/providers",
+    "dist/runtime",
+    "dist/server",
+    "dist/storage",
+    "dist/telemetry",
+    "dist/tools",
+    "dist/ui",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/build-ui.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-ui.mjs && node scripts/build-desktop.mjs",
     "build:ui": "node scripts/build-ui.mjs",
+    "build:desktop": "node scripts/build-desktop.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
@@ -26,10 +39,13 @@
     "pack:test": "node scripts/pack-test.mjs"
   },
   "devDependencies": {
+    "@electron/packager": "^18.3.9",
     "@eslint/js": "^9.18.0",
     "@types/node": "^22.20.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "electron": "44.5.1",
+    "electron-builder": "^26.5.2",
     "esbuild": "^0.28.2",
     "eslint": "^9.18.0",
     "react": "^19.3.0",
@@ -37,5 +53,9 @@
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0",
     "vitest": "^3.0.5"
+  },
+  "allowScripts": {
+    "electron@44.5.1": true,
+    "esbuild@0.28.2": true
   }
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import type { ToolDefinition } from "../providers/types.js";
 import { resolveInScope } from "../platform/paths.js";
 import { contentVersion } from "./read.js";
+import { throwIfFault } from "../runtime/faults.js";
 import { toolFailure, type Tool, type ToolContext, type ToolResult } from "./types.js";
 
 export type EditOperation =
@@ -108,40 +109,39 @@ export class EditTool implements Tool<EditOperation> {
     if (absolute === null) {
       return Promise.resolve(toolFailure("invalid-args", "edit path escapes the workspace", false));
     }
-    // Keyed queue: every caller chains its whole synchronous mutation onto
-    // the TAIL and replaces the tail with its own completion. The previous
-    // version dropped the chain when a holder finished out of order; this
-    // version threads completions so all queued writers run in arrival
-    // order. executeSync itself is synchronous, so no interleave is possible
-    // once queued — the chain only orders arrival.
-    const prior = EditTool.locks.get(absolute) ?? Promise.resolve();
-    const run = prior.then(() => this.executeSync(rawArgs, context, absolute));
-    // The tail must never reject (a throw inside executeSync is already a
-    // ToolResult via the inner try/catch, but guard anyway so one failure
-    // cannot break the queue for later writers).
-    const tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    EditTool.locks.set(absolute, tail);
+    const targets = [absolute];
+    if (rawArgs.kind === "rename") {
+      const destination = resolveInWorkspace(context.workspaceRoot, rawArgs.newPath);
+      if (destination === null) return Promise.resolve(toolFailure("invalid-args", "rename destination escapes the workspace", false));
+      targets.push(destination);
+    }
+    const keys = [...new Set(targets)].sort();
+    const run = Promise.all(keys.map((key) => EditTool.locks.get(key) ?? Promise.resolve()))
+      .then(() => this.executeSync(rawArgs, context, absolute));
+    const tail = run.then(() => undefined, () => undefined);
+    for (const key of keys) EditTool.locks.set(key, tail);
+    void tail.then(() => { for (const key of keys) if (EditTool.locks.get(key) === tail) EditTool.locks.delete(key); });
     return run;
   }
 
   private executeSync(rawArgs: EditOperation, context: ToolContext, absolute: string): ToolResult {
+    const effect = { applied: false };
+    const effected = (): void => { effect.applied = true; throwIfFault("after-edit-effect"); };
     try {
       switch (rawArgs.kind) {
         case "create":
-          return this.create(absolute, rawArgs);
+          return this.create(absolute, rawArgs, effected);
         case "replace":
-          return this.replace(absolute, rawArgs);
+          return this.replace(absolute, rawArgs, effected);
         case "delete":
-          return this.delete(absolute, rawArgs);
+          return this.delete(absolute, rawArgs, effected);
         case "rename":
-          return this.rename(absolute, rawArgs, context);
+          return this.rename(absolute, rawArgs, context, effected);
         default:
           return toolFailure("invalid-args", "unknown edit kind", false);
       }
     } catch (error) {
+      if (effect.applied) return { status: "unknown", effectUncertain: true, errorKind: "post-effect-observation", errorRetryable: false, summary: "edit effect may have applied; read the affected paths before any recovery", detail: error instanceof Error ? error.message : "observation failed" };
       return toolFailure(
         "io-error",
         `edit failed: ${error instanceof Error ? error.message : "unknown error"}`,
@@ -150,7 +150,7 @@ export class EditTool implements Tool<EditOperation> {
     }
   }
 
-  private create(absolute: string, args: Extract<EditOperation, { kind: "create" }>): ToolResult {
+  private create(absolute: string, args: Extract<EditOperation, { kind: "create" }>, effected: () => void): ToolResult {
     if (typeof args.content !== "string") {
       return toolFailure("invalid-args", "create requires content", false);
     }
@@ -161,6 +161,7 @@ export class EditTool implements Tool<EditOperation> {
     // Atomic create: temp in the SAME directory + rename, so a crash leaves
     // either absence or the complete file, never a truncated partial.
     writeAtomic(absolute, Buffer.from(args.content, "utf8"));
+    effected();
     const after = contentVersion(Buffer.from(args.content, "utf8"));
     return {
       status: "completed",
@@ -171,7 +172,7 @@ export class EditTool implements Tool<EditOperation> {
     };
   }
 
-  private replace(absolute: string, args: Extract<EditOperation, { kind: "replace" }>): ToolResult {
+  private replace(absolute: string, args: Extract<EditOperation, { kind: "replace" }>, effected: () => void): ToolResult {
     if (typeof args.oldText !== "string" || args.oldText === "" || typeof args.newText !== "string") {
       return toolFailure("invalid-args", "replace requires non-empty oldText and newText", false);
     }
@@ -218,6 +219,7 @@ export class EditTool implements Tool<EditOperation> {
       );
     }
     writeAtomic(absolute, prepared, beforeStat.mode & 0o777);
+    effected();
     const observed = fs.readFileSync(absolute);
     const after = contentVersion(observed);
     const beforeStored = storedPreview(before);
@@ -240,7 +242,7 @@ export class EditTool implements Tool<EditOperation> {
     };
   }
 
-  private delete(absolute: string, args: Extract<EditOperation, { kind: "delete" }>): ToolResult {
+  private delete(absolute: string, args: Extract<EditOperation, { kind: "delete" }>, effected: () => void): ToolResult {
     if (!fs.existsSync(absolute)) {
       return toolFailure("not-found", `delete refused: ${args.path} does not exist`, false);
     }
@@ -258,6 +260,7 @@ export class EditTool implements Tool<EditOperation> {
     }
     const stored = storedPreview(before);
     fs.unlinkSync(absolute);
+    effected();
     return {
       status: "completed",
       summary: `deleted ${args.path}`,
@@ -266,7 +269,7 @@ export class EditTool implements Tool<EditOperation> {
     };
   }
 
-  private rename(absolute: string, args: Extract<EditOperation, { kind: "rename" }>, context: ToolContext): ToolResult {
+  private rename(absolute: string, args: Extract<EditOperation, { kind: "rename" }>, context: ToolContext, effected: () => void): ToolResult {
     if (typeof args.newPath !== "string" || args.newPath === "") {
       return toolFailure("invalid-args", "rename requires newPath", false);
     }
@@ -295,12 +298,9 @@ export class EditTool implements Tool<EditOperation> {
     } catch (error) {
       const stillThere = fs.existsSync(absolute);
       const arrived = fs.existsSync(destination);
-      return toolFailure(
-        "io-error",
-        `rename partially applied or failed (source present: ${stillThere}, destination present: ${arrived}): ${error instanceof Error ? error.message : "unknown error"}`,
-        true,
-      );
+      return { status: "unknown", effectUncertain: true, errorKind: "io-error", errorRetryable: false, summary: `rename partially applied or failed (source present: ${stillThere}, destination present: ${arrived}): ${error instanceof Error ? error.message : "unknown error"}` };
     }
+    effected();
     return {
       status: "completed",
       summary: `renamed ${args.path} to ${args.newPath}`,

@@ -1,0 +1,11 @@
+{
+  "name": "lattice-p0",
+  "productName": "Lattice P0",
+  "version": "0.0.0",
+  "description": "Lattice Phase 0 packaging proof (internal test artifact, not a release)",
+  "main": "dist/desktop/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  }
+}

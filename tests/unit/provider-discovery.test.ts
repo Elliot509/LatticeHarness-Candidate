@@ -48,7 +48,7 @@ describe("model discovery", () => {
   });
 
   it("classifies auth, incompatibility, network and partial failures", async () => {
-    const auth = await listModels({ baseUrl: "http://x/v1", apiKey: "bad", fetchImpl: stubFetch(() => jsonResponse(401, {})) });
+    const auth = await listModels({ baseUrl: "https://x/v1", apiKey: "bad", fetchImpl: stubFetch(() => jsonResponse(401, {})) });
     expect(auth).toEqual({ ok: false, kind: "auth", detail: expect.stringContaining("401") });
 
     const missing = await listModels({ baseUrl: "http://x/v1", fetchImpl: stubFetch(() => jsonResponse(404, {})) });
@@ -59,14 +59,14 @@ describe("model discovery", () => {
       baseUrl: "http://127.0.0.1:9/v1",
       fetchImpl: stubFetch(() => { throw new TypeError("fetch failed"); }),
     });
-    expect(down).toEqual({ ok: false, kind: "network", detail: "fetch failed" });
+    expect(down).toEqual({ ok: false, kind: "network", detail: "models request failed" });
 
     const partial = await listModels({ baseUrl: "http://x/v1", fetchImpl: stubFetch(() => jsonResponse(200, { object: "list" })) });
     expect(partial.ok).toBe(false);
     if (!partial.ok) expect(partial.kind).toBe("partial");
 
     const empty = await listModels({ baseUrl: "", fetchImpl: stubFetch(() => jsonResponse(200, {})) });
-    expect(empty).toEqual({ ok: false, kind: "invalid", detail: "base URL is empty" });
+    expect(empty).toEqual({ ok: false, kind: "invalid", detail: "invalid endpoint or credential transport" });
   });
 
   it("reports timeouts as timeouts, not generic network errors", async () => {

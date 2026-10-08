@@ -66,7 +66,7 @@ describe("openai adapter contract", () => {
         usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
       },
     });
-    const adapter = new OpenAiAdapter({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
     expect(adapter.adapterRevision).toBe(OPENAI_ADAPTER_REVISION);
     const response = await adapter.complete(request());
     expect(response.toolCalls).toEqual([{ id: "call_1", name: "search", argumentsJson: "{\"kind\":\"text\"}" }]);
@@ -75,7 +75,7 @@ describe("openai adapter contract", () => {
     expect(response.providerRequestId).toBe("chatcmpl-1");
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(init.method).toBe("POST");
-    expect(init.headers).toMatchObject({ Authorization: "Bearer k" });
+    expect(init.headers).toMatchObject({ Authorization: "Bearer synthetic-provider-credential" });
   });
 
   it("keeps cache partitions unknown when the API reports none", async () => {
@@ -88,16 +88,204 @@ describe("openai adapter contract", () => {
         usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
       },
     });
-    const adapter = new OpenAiAdapter({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
     const response = await adapter.complete(request());
     expect(response.usage?.cacheReadTokens).toBeUndefined();
     expect(response.usage?.cacheWriteTokens).toBeUndefined();
+    // No cache evidence: the input partition convention stays undeclared so
+    // telemetry keeps the partitions UNKNOWN (fail-closed, never zero).
+    expect(response.usage?.inclusiveInput).toBeUndefined();
+  });
+
+  it("reads OpenAI prompt_tokens_details as inclusive cache partitions", async () => {
+    // Wire shape per the official OpenAI API (openai-python
+    // PromptTokensDetails: cached_tokens / cache_write_tokens inside
+    // prompt_tokens_details; prompt_tokens is the inclusive total).
+    const fetchImpl = stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        id: "chatcmpl-cache",
+        model: "gpt-test",
+        choices: [{ message: { content: "hi" } }],
+        usage: {
+          prompt_tokens: 1000,
+          completion_tokens: 200,
+          total_tokens: 1200,
+          prompt_tokens_details: { cached_tokens: 400, cache_write_tokens: 100 },
+        },
+      },
+    });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const response = await adapter.complete(request());
+    expect(response.usage).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 400,
+      cacheWriteTokens: 100,
+      inclusiveInput: true,
+    });
+  });
+
+  it("reads the OpenRouter normalized usage shape identically", async () => {
+    // OpenRouter ResponseUsage: prompt_tokens inclusive total with
+    // prompt_tokens_details { cached_tokens, cache_write_tokens? }.
+    // A partial details object is NOT enough to declare the partition
+    // convention (telemetry would otherwise derive the missing partition
+    // as zero), so the window stays fail-closed downstream; the evidenced
+    // partition is still carried as a known quantity.
+    const fetchImpl = stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        id: "gen-or-1",
+        model: "openai/gpt-test",
+        choices: [{ message: { content: "hi" } }],
+        usage: {
+          prompt_tokens: 1100,
+          completion_tokens: 50,
+          total_tokens: 1150,
+          prompt_tokens_details: { cached_tokens: 400 },
+        },
+      },
+    });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const response = await adapter.complete(request());
+    expect(response.usage).toMatchObject({
+      inputTokens: 1100,
+      outputTokens: 50,
+      cacheReadTokens: 400,
+    });
+    expect(response.usage?.cacheWriteTokens).toBeUndefined();
+    expect(response.usage?.inclusiveInput).toBeUndefined();
+  });
+
+  it("treats explicit zero cache details as known zero", async () => {
+    const fetchImpl = stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        id: "chatcmpl-zero",
+        model: "gpt-test",
+        choices: [{ message: { content: "hi" } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        },
+      },
+    });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const response = await adapter.complete(request());
+    expect(response.usage).toMatchObject({
+      inputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      inclusiveInput: true,
+    });
+  });
+
+  it("ignores malformed cache details without inventing partitions", async () => {
+    const fetchImpl = stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        id: "chatcmpl-bad",
+        model: "gpt-test",
+        choices: [{ message: { content: "hi" } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          // Wrong types: not evidence. Partitions stay absent; the input
+          // convention stays undeclared; telemetry keeps them UNKNOWN.
+          prompt_tokens_details: { cached_tokens: "400", cache_write_tokens: -5 },
+        },
+      },
+    });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const response = await adapter.complete(request());
+    expect(response.usage).toMatchObject({ inputTokens: 100, outputTokens: 20 });
+    expect(response.usage?.cacheReadTokens).toBeUndefined();
+    expect(response.usage?.cacheWriteTokens).toBeUndefined();
+    expect(response.usage?.inclusiveInput).toBeUndefined();
+  });
+
+  it("keeps reasoning inside output and out of input/cache accounting", async () => {
+    const fetchImpl = stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        id: "chatcmpl-reason",
+        model: "gpt-test",
+        choices: [{ message: { content: "hi" } }],
+        usage: {
+          prompt_tokens: 1000,
+          completion_tokens: 200,
+          total_tokens: 1200,
+          prompt_tokens_details: { cached_tokens: 100, cache_write_tokens: 50 },
+          completion_tokens_details: { reasoning_tokens: 60 },
+        },
+      },
+    });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const response = await adapter.complete(request());
+    expect(response.usage).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 50,
+      reasoningTokens: 60,
+      inclusiveInput: true,
+    });
+  });
+
+  it("normalizes inclusive cache partitions through the ledger without double counting", async () => {
+    // End-to-end of the normalization boundary for one documented provider
+    // example: prompt_tokens=1000 inclusive, cached=400, write=100,
+    // completion=200. Lattice partitions must be disjoint
+    // (inputNew = 1000-400-100 = 500).
+    const { normalizeUsageQuantities } = await import("../../src/telemetry/usage.js");
+    const fetchImpl = stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        id: "chatcmpl-norm",
+        model: "gpt-test",
+        choices: [{ message: { content: "hi" } }],
+        usage: {
+          prompt_tokens: 1000,
+          completion_tokens: 200,
+          total_tokens: 1200,
+          prompt_tokens_details: { cached_tokens: 400, cache_write_tokens: 100 },
+        },
+      },
+    });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const response = await adapter.complete(request());
+    const asInt = (value: unknown): number | null =>
+      typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+    const normalized = normalizeUsageQuantities({
+      inputTotal: asInt(response.usage?.inputTokens),
+      outputTotal: asInt(response.usage?.outputTokens),
+      cacheRead: asInt(response.usage?.cacheReadTokens),
+      cacheWrite: asInt(response.usage?.cacheWriteTokens),
+      reasoningSubset: asInt(response.usage?.reasoningTokens),
+      ...(response.usage?.inclusiveInput === true ? { inclusiveInput: true as const } : {}),
+      source: "openai/openai-chat-completions-2",
+    });
+    expect(normalized.inputNew).toMatchObject({ value: 500, quality: "observed" });
+    expect(normalized.cacheRead).toMatchObject({ value: 400, quality: "observed" });
+    expect(normalized.cacheWrite).toMatchObject({ value: 100, quality: "observed" });
+    expect(normalized.inputTotal).toMatchObject({ value: 1000, quality: "observed" });
+    expect(normalized.outputTotal).toMatchObject({ value: 200, quality: "observed" });
   });
 
   it("maps auth, rate limit and server errors without retrying", async () => {
     for (const [status, kind] of [[401, "auth"], [429, "rate-limited"], [500, "server-error"], [400, "invalid-request"]] as const) {
       const fetchImpl = stubFetch({ ok: false, status, body: { error: { message: "nope" } } });
-      const adapter = new OpenAiAdapter({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+      const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
       try {
         await adapter.complete(request());
         expect.unreachable();
@@ -112,7 +300,7 @@ describe("openai adapter contract", () => {
 
   it("maps network failure and caller abort distinctly", async () => {
     const failing = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
-    const adapter = new OpenAiAdapter({ apiKey: "k", fetchImpl: failing as unknown as typeof fetch });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: failing as unknown as typeof fetch });
     await expect(adapter.complete(request())).rejects.toMatchObject({ kind: "network" });
 
     const controller = new AbortController();
@@ -122,7 +310,7 @@ describe("openai adapter contract", () => {
         init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
       });
     }) as unknown as typeof fetch);
-    const adapter2 = new OpenAiAdapter({ apiKey: "k", fetchImpl: hanging });
+    const adapter2 = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: hanging });
     await expect(adapter2.complete({ ...request(), signal: controller.signal })).rejects.toMatchObject({
       kind: "aborted",
     });
@@ -130,7 +318,7 @@ describe("openai adapter contract", () => {
 
   it("rejects responses without choices and omits auth for local endpoints", async () => {
     const fetchImpl = stubFetch({ ok: true, status: 200, body: { choices: [] } });
-    const adapter = new OpenAiAdapter({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAiAdapter({ apiKey: "synthetic-provider-credential", fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(adapter.complete(request())).rejects.toMatchObject({ kind: "unknown" });
 
     const localFetch = stubFetch({

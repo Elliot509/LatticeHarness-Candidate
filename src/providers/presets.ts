@@ -1,3 +1,4 @@
+import { normalizeEndpoint } from "./endpoint.js";
 // Provider presets for S5 productization.
 //
 // A preset is configuration UX for a known service, NOT a protocol
@@ -128,20 +129,7 @@ export interface CustomPresetInput {
 }
 
 function validatedBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim();
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new Error("base URL must be a valid http(s) URL");
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("base URL must use http or https");
-  }
-  if (parsed.username !== "" || parsed.password !== "") {
-    throw new Error("base URL must not embed credentials");
-  }
-  return trimmed.replace(/\/+$/, "");
+  return normalizeEndpoint(baseUrl);
 }
 
 export function buildCustomPreset(input: CustomPresetInput): ProviderPreset {

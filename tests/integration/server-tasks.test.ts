@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openLatticeDb, type LatticeDb } from "../../src/storage/db.js";
 import { claimOwnership } from "../../src/storage/db.js";
 import { TaskManager } from "../../src/server/tasks.js";
+import { FakeProvider } from "../../src/providers/fake.js";
+import type { UiEvent } from "../../src/server/protocol.js";
 
 let dirs: string[] = [];
 let handles: LatticeDb[] = [];
@@ -43,6 +45,32 @@ function createReady(tasks: TaskManager) {
 }
 
 describe("task commands", () => {
+  it("streams committed tool output, verification, chat and settled budget without a reload", async () => {
+    const tasks = manager();
+    const taskId = createReady(tasks);
+    const events: UiEvent[] = [];
+    tasks.subscribe(taskId, (event) => events.push(event));
+    const provider = new FakeProvider([
+      { toolCalls: [{ name: "exec", argumentsJson: JSON.stringify({ executable: process.execPath, argv: ["-e", "console.log('ok 1 - project verified')"] }) }] },
+      { text: "Project verified." },
+    ]);
+    expect(tasks.startTask(taskId, "stream-run", provider).accepted).toBe(true);
+    const deadline = Date.now() + 5000;
+    while (tasks.snapshot(taskId).state === "RUNNING" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const snapshot = tasks.snapshot(taskId);
+    expect(snapshot.state).toBe("COMPLETED");
+    const completed = events.find((event) => event.kind === "tool" && event.tool.complete === true);
+    expect(completed?.kind === "tool" ? completed.tool : null).toEqual(snapshot.tools[0]);
+    expect(snapshot.tools[0]?.summary).toContain("exit 0");
+    expect(events.some((event) => event.kind === "verification" && event.verification.passed === 1)).toBe(true);
+    expect(events.some((event) => event.kind === "message" && event.message.text === "Project verified.")).toBe(true);
+    const budgets = events.filter((event) => event.kind === "budget");
+    expect(budgets.at(-1)?.kind === "budget" ? budgets.at(-1)?.budget : null).toEqual(snapshot.budget);
+    expect(snapshot.budget.settledCalls).toBe(2);
+  });
+
   it("creates tasks inside the server workspace only", () => {
     const tasks = manager();
     const ok = tasks.handleCommand({
@@ -103,7 +131,7 @@ describe("task commands", () => {
     const snapshot = tasks.snapshot(taskId);
     expect(snapshot.contractRevision).toBe(2);
     expect(snapshot.steering).toHaveLength(1);
-    expect(snapshot.steering[0]).toMatchObject({ state: "applied", appliedRevision: 2 });
+    expect(snapshot.steering[0]).toMatchObject({ state: "accepted", appliedRevision: null });
     expect(snapshot.objective).toContain("Fix the bug");
   });
 
@@ -162,7 +190,7 @@ describe("task commands", () => {
     expect(again).toMatchObject({ accepted: false });
   });
 
-  it("select-model applies on idle tasks", () => {
+  it("select-model stays pending until the next bound request", () => {
     const tasks = manager();
     const taskId = createReady(tasks);
     tasks.handleCommand({
@@ -177,7 +205,7 @@ describe("task commands", () => {
       payload: { provider: "openai", model: "m2", baseUrl: "http://127.0.0.1:9" },
     });
     expect(switched).toMatchObject({ accepted: true });
-    expect(tasks.snapshot(taskId).model).toBe("m2");
+    expect(tasks.snapshot(taskId).model).toBe("m1");
   });
 
   it("stores keys in memory without echoing them", () => {
@@ -223,9 +251,9 @@ describe("task commands", () => {
     const taskId = createReady(tasks);
     const snapshot = tasks.snapshot(taskId);
     expect(snapshot.protocol).toBe("ui-1");
-    expect(snapshot.budget).toMatchObject({ grantedCalls: 50, grantedTokens: 200_000 });
+    expect(snapshot.budget).toMatchObject({ grantedCalls: null, grantedTokens: null });
     expect(snapshot.unknowns).toBe(0);
     expect(snapshot.contextUsage).toEqual({ known: false });
-    expect(snapshot.messages).toEqual([]);
+    expect(snapshot.messages[0]).toMatchObject({ author: "user", text: "Fix the bug" });
   });
 });

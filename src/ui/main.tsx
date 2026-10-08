@@ -31,7 +31,7 @@ function TaskView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [state.activeTaskId, state.task?.state]);
 
   useEffect(() => {
     const taskId = state.activeTaskId;
@@ -47,18 +47,7 @@ function TaskView(): JSX.Element {
         unsubscribe = api.subscribe(
           taskId,
           (event: UiEvent) => {
-            if (event.kind === "resync") {
-              api
-                .snapshot(taskId)
-                .then((fresh) => {
-                  if (!cancelled) dispatch({ type: "snapshot", snapshot: fresh });
-                })
-                .catch(() => {
-                  if (!cancelled) dispatch({ type: "request-resync" });
-                });
-              return;
-            }
-            dispatch({ type: "event", event });
+            if (!cancelled) dispatch({ type: "event", event });
           },
           (status) => {
             if (!cancelled) dispatch({ type: "connection", connection: status === "live" ? "live" : "reconnecting" });
@@ -77,17 +66,23 @@ function TaskView(): JSX.Element {
   useEffect(() => {
     if (!state.needsResync || state.activeTaskId === null) return;
     const taskId = state.activeTaskId;
+    const target = state.resyncTarget ?? state.lastSeq;
     let cancelled = false;
-    api
-      .snapshot(taskId)
-      .then((snapshot) => {
-        if (!cancelled) dispatch({ type: "snapshot", snapshot });
-      })
-      .catch(() => undefined);
+    const isCancelled = (): boolean => cancelled;
+    const refresh = async (): Promise<void> => {
+      while (!isCancelled()) {
+        const snapshot = await api.snapshot(taskId);
+        if (isCancelled()) return;
+        dispatch({ type: "snapshot", snapshot });
+        if (snapshot.cut >= target) return;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    };
+    void refresh().catch(() => { if (!cancelled) dispatch({ type: "connection", connection: "error", error: "Não foi possível atualizar a tarefa" }); });
     return () => {
       cancelled = true;
     };
-  }, [state.needsResync, state.activeTaskId]);
+  }, [state.needsResync, state.resyncTarget, state.activeTaskId]);
 
   return (
     <div className="app">
@@ -131,6 +126,7 @@ function TaskView(): JSX.Element {
                   <Chat state={state} dispatch={dispatch} />
                 </div>
                 <Composer api={api} state={state} dispatch={dispatch} />
+                {state.actionError && <p className="conn error" role="alert">{state.actionError} <button type="button" className="btn" onClick={() => { dispatch({ type: "clear-action-error" }); }}>Fechar aviso da ação</button></p>}
               </>
             )}
             {state.connection === "reconnecting" && (

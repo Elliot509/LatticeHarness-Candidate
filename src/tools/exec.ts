@@ -35,7 +35,7 @@ export const EXEC_DEFINITION: ToolDefinition = {
     properties: {
       mode: { type: "string", enum: ["argv", "shell"] },
       executable: { type: "string" },
-      argv: { type: "array" },
+      argv: { type: "array", items: { type: "string" } },
       shell: { type: "string", enum: ["cmd", "powershell", "sh"] },
       command: { type: "string" },
       cwd: { type: "string" },
@@ -45,6 +45,10 @@ export const EXEC_DEFINITION: ToolDefinition = {
       maxBytes: { type: "number" },
     },
     additionalProperties: false,
+    oneOf: [
+      { required: ["executable", "argv"], properties: { mode: { const: "argv" } }, not: { anyOf: [{ required: ["command"] }, { required: ["shell"] }] } },
+      { required: ["mode", "shell", "command"], properties: { mode: { const: "shell" } }, not: { anyOf: [{ required: ["executable"] }, { required: ["argv"] }] } },
+    ],
   },
 };
 
@@ -56,7 +60,12 @@ function baseEnv(context: ToolContext, extra: Record<string, string> | undefined
 }
 
 function resolveCommand(args: ExecArgs): { executable: string; argv: string[] } | { error: string } {
+  const fields = args as unknown as Record<string, unknown>;
+  if (Object.keys(fields).some((key) => !["mode", "executable", "argv", "shell", "command", "cwd", "env", "timeoutMs", "input", "maxBytes"].includes(key))) {
+    return { error: "Unknown exec field. Use {executable, argv} or {mode:'shell', shell, command}." };
+  }
   if (args.mode === "shell") {
+    if ("executable" in fields || "argv" in fields) return { error: "shell mode cannot contain executable/argv; use mode:'shell', shell and command" };
     if (typeof args.command !== "string" || args.command === "") {
       return { error: "shell mode requires a non-empty command" };
     }
@@ -71,11 +80,14 @@ function resolveCommand(args: ExecArgs): { executable: string; argv: string[] } 
         return { error: "shell must be cmd, powershell or sh" };
     }
   }
+  if ((fields["mode"] !== undefined && fields["mode"] !== "argv") || "command" in fields || "shell" in fields) {
+    return { error: "argv mode cannot contain command/shell. For shell text use {mode:'shell', shell:'sh'|'powershell'|'cmd', command}." };
+  }
   if (typeof args.executable !== "string" || args.executable === "") {
     return { error: "argv mode requires an executable" };
   }
-  if (args.argv !== undefined && (!Array.isArray(args.argv) || args.argv.some((a) => typeof a !== "string"))) {
-    return { error: "argv must be an array of strings" };
+  if (!Array.isArray(args.argv) || args.argv.some((a) => typeof a !== "string")) {
+    return { error: "argv must be an explicit array of strings (use [] deliberately for no arguments)" };
   }
   return { executable: args.executable, argv: args.argv ?? [] };
 }
@@ -85,14 +97,11 @@ async function killTree(child: ChildProcess, isClosed: () => boolean): Promise<v
   if (process.platform === "win32") {
     if (child.pid !== undefined) {
       await new Promise<void>((resolve) => {
-        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-        killer.on("error", () => {
-          resolve();
-        });
-        killer.on("exit", () => {
-          resolve();
-        });
-        setTimeout(resolve, 5000);
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+        const timer = setTimeout(resolve, 5000);
+        const done = (): void => { clearTimeout(timer); resolve(); };
+        killer.once("error", done);
+        killer.once("exit", done);
       });
     }
     return;
@@ -120,16 +129,21 @@ async function killTree(child: ChildProcess, isClosed: () => boolean): Promise<v
   }
 }
 
-function waitExit(child: ChildProcess, isClosed: () => boolean, timeoutMs: number): Promise<boolean> {
+function waitExit(child: ChildProcess, isClosed: () => boolean, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
   if (isClosed()) return Promise.resolve(true);
+  if (signal?.aborted === true) return Promise.resolve(false);
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      resolve(false);
-    }, timeoutMs);
-    child.once("close", () => {
+    const finish = (closed: boolean): void => {
       clearTimeout(timer);
-      resolve(true);
-    });
+      child.off("close", onClose);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(closed);
+    };
+    const onClose = (): void => { finish(true); };
+    const onAbort = (): void => { finish(false); };
+    const timer = setTimeout(onAbort, timeoutMs);
+    child.once("close", onClose);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -137,6 +151,7 @@ export class ExecTool implements Tool<ExecArgs> {
   readonly definition = EXEC_DEFINITION;
 
   async execute(rawArgs: ExecArgs, context: ToolContext): Promise<ToolResult> {
+    if (isAborted(context.signal)) return { status: "cancelled", summary: "command cancelled before spawn", complete: true };
     const resolved = resolveCommand(rawArgs);
     if ("error" in resolved) {
       return toolFailure("invalid-args", resolved.error, false);
@@ -233,15 +248,15 @@ export class ExecTool implements Tool<ExecArgs> {
       return toolFailure("spawn-failed", `cannot start process: ${failed}`, false);
     }
 
-    const finished = await waitExit(child, isClosed, timeoutMs);
+    const finished = await waitExit(child, isClosed, timeoutMs, context.signal);
     const durationMs = Date.now() - startedAt;
     if (!finished) {
       await killTree(child, isClosed);
       await waitExit(child, isClosed, 5000);
       const end = endState(child);
       return {
-        status: "timeout",
-        summary: `command timed out after ${timeoutMs}ms (${end})`,
+        status: isAborted(context.signal) ? "cancelled" : "timeout",
+        summary: isAborted(context.signal) ? `command cancellation requested (${end}); prior effects remain uncertain` : `command timed out after ${timeoutMs}ms (${end})`,
         detail: renderOutput(stdoutChunks, stderrChunks, truncated.stdout, truncated.stderr),
         truncated: truncated.stdout || truncated.stderr,
         effectUncertain: true,
@@ -268,6 +283,8 @@ export class ExecTool implements Tool<ExecArgs> {
     };
   }
 }
+
+function isAborted(signal: AbortSignal | undefined): boolean { return signal?.aborted === true; }
 
 function endState(child: ChildProcess): string {
   if (child.exitCode !== null) return `exit ${child.exitCode}`;

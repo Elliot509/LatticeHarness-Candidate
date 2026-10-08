@@ -185,7 +185,8 @@ describe("workspace drift and stale evidence", () => {
     expect(drift).toHaveLength(1);
     expect(drift[0]).toMatchObject({ path: "a.txt", change: "modified" });
     const report = evaluateResumeGate(db.raw, { taskId, generation: 1, packageVersion: "0.0.0" });
-    expect(report.canResume).toBe(true);
+    expect(report.canResume).toBe(false);
+    expect(report.blockers.some((entry) => entry.code === "unknown-effects")).toBe(true);
     expect(report.staleEvidence).toHaveLength(1);
     expect(report.staleEvidence[0]?.path).toBe("a.txt");
   });
@@ -278,7 +279,8 @@ describe("resume gate", () => {
     if (!claimed.admitted) throw new Error("admission failed");
     expect(claimDurable(opened.raw, claimed.attemptId, 1, 1)).toEqual({ claimed: true });
     const report = evaluateResumeGate(opened.raw, { taskId, generation: 2, packageVersion: "0.0.0" });
-    expect(report.canResume).toBe(true);
+    expect(report.canResume).toBe(false);
+    expect(report.blockers.some((entry) => entry.code === "unknown-effects")).toBe(true);
     expect(report.invalidatedAdmissions).toEqual([orphan.intentId]);
     expect(report.unknowns.map((entry) => entry.attemptId)).toEqual([claimed.attemptId]);
     // A second evaluation finds nothing left to classify: classification is durable.
@@ -333,14 +335,14 @@ describe("resume gate", () => {
     expect(runs.n).toBe(2);
   });
 
-  it("manual resume preserves a WAITING state instead of forcing READY", () => {    const root = dir();
+  it("manual resume makes WAITING startable while retaining the durable wait gate", () => {    const root = dir();
     const opened = track(openLatticeDb(path.join(root, "data")));
     const workspace = path.join(root, "ws");
     fs.mkdirSync(workspace, { recursive: true });
     const { taskId } = persistTask(opened.raw, workspace, { taskState: "WAITING" });
     const report = resumeTask(opened.raw, { taskId, generation: 2, packageVersion: "0.0.0" });
     expect(report.canResume).toBe(true);
-    expect(readTaskState(opened.raw, taskId).state).toBe("WAITING");
+    expect(readTaskState(opened.raw, taskId).state).toBe("READY");
   });
 
   it("preserves settled budget across close and reopen with no renewal", () => {

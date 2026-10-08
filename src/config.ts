@@ -1,9 +1,10 @@
 import path from "node:path";
 import { resolveDataDir } from "./platform/paths.js";
+import { validLimit } from "./runtime/budget.js";
 
-export const DEFAULT_MAX_MODEL_ATTEMPTS = 50;
-export const DEFAULT_MAX_TOTAL_TOKENS = 200_000;
-export const DEFAULT_TASK_EXPIRY_MS = 30 * 60 * 1000;
+export const DEFAULT_MAX_MODEL_ATTEMPTS = null;
+export const DEFAULT_MAX_TOTAL_TOKENS = null;
+export const DEFAULT_TASK_EXPIRY_MS = null;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 
 export interface LatticeConfig {
@@ -11,9 +12,9 @@ export interface LatticeConfig {
   workspace: string;
   provider: string | null;
   model: string | null;
-  maxModelAttempts: number;
-  maxTotalTokens: number;
-  taskExpiryMs: number;
+  maxModelAttempts: number | null;
+  maxTotalTokens: number | null;
+  taskExpiryMs: number | null;
   commandTimeoutMs: number;
 }
 
@@ -22,9 +23,9 @@ export interface ConfigInput {
   workspace?: string | undefined;
   provider?: string | undefined;
   model?: string | undefined;
-  maxModelAttempts?: number | undefined;
-  maxTotalTokens?: number | undefined;
-  taskExpiryMs?: number | undefined;
+  maxModelAttempts?: number | null | undefined;
+  maxTotalTokens?: number | null | undefined;
+  taskExpiryMs?: number | null | undefined;
   commandTimeoutMs?: number | undefined;
 }
 
@@ -63,13 +64,13 @@ export function validateConfig(config: LatticeConfig): string[] {
   if (config.model !== null && config.model.trim() === "") {
     errors.push("model must be null or a non-empty name");
   }
-  if (!positiveInt(config.maxModelAttempts)) {
+  if (!validLimit(config.maxModelAttempts)) {
     errors.push("maxModelAttempts must be a positive integer");
   }
-  if (!positiveInt(config.maxTotalTokens)) {
+  if (!validLimit(config.maxTotalTokens)) {
     errors.push("maxTotalTokens must be a positive integer");
   }
-  if (!positiveInt(config.taskExpiryMs)) {
+  if (!validLimit(config.taskExpiryMs)) {
     errors.push("taskExpiryMs must be a positive integer of milliseconds");
   }
   if (!positiveInt(config.commandTimeoutMs)) {

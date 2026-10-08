@@ -13,6 +13,8 @@ export type FaultPoint =
   | "after-admitted"
   | "before-claim-commit"
   | "after-claim"
+  | "after-edit-effect"
+  | "before-revision-commit"
   | "before-receipt-commit"
   | "before-cursor-commit"
   | "export-mid-write"

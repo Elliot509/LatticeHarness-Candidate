@@ -34,6 +34,38 @@ function snapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
 }
 
 describe("ui reducer", () => {
+  it("removes rejected pending commands and restores a delayed draft to its original task", () => {
+    let state = uiReducer(initialState, { type: "open-task", taskId: "task-1" });
+    state = uiReducer(state, { type: "command-sent", command: { commandId: "c", kind: "steer", text: "draft", sentAt: 1 } });
+    state = uiReducer(state, { type: "command-failed", taskId: "task-1", commandId: "c", error: "denied" });
+    expect(state.pending).toEqual([]); expect(state.actionError).toBe("denied");
+    state = uiReducer(state, { type: "open-task", taskId: "task-2" });
+    state = uiReducer(state, { type: "task-draft", taskId: "task-1", draft: "restored" });
+    expect(state.draft).toBe(""); expect(state.drafts?.["task-1"]).toBe("restored");
+    expect(state.actionError).toBeNull();
+  });
+  it("does not clear a newer gap when a snapshot from an older in-flight resync arrives", () => {
+    let state = uiReducer(initialState, { type: "open-task", taskId: "task-1" });
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ cut: 3 }) });
+    state = uiReducer(state, { type: "event", event: { seq: 5, kind: "state", state: "RUNNING", reason: "", contractRevision: 1 } });
+    state = uiReducer(state, { type: "event", event: { seq: 9, kind: "state", state: "COMPLETED", reason: "observed", contractRevision: 1 } });
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ state: "RUNNING", cut: 5 }) });
+    expect(state.needsResync).toBe(true); expect(state.resyncTarget).toBe(9);
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ state: "COMPLETED", cut: 9 }) });
+    expect(state.needsResync).toBe(false); expect(state.task?.state).toBe("COMPLETED");
+  });
+  it("keeps a completed projection when an older snapshot arrives and reopening the same task preserves its draft", () => {
+    let state = uiReducer(initialState, { type: "open-task", taskId: "task-1" });
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ state: "COMPLETED", cut: 12 }) });
+    state = uiReducer(state, { type: "draft", draft: "preserved" });
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ state: "READY", cut: 10 }) });
+    state = uiReducer(state, { type: "open-task", taskId: "task-1" });
+    expect(state.task?.state).toBe("COMPLETED"); expect(state.draft).toBe("preserved");
+    state = uiReducer(state, { type: "open-task", taskId: "task-2" });
+    expect(state.draft).toBe("");
+    state = uiReducer(state, { type: "open-task", taskId: "task-1" });
+    expect(state.draft).toBe("preserved");
+  });
   it("applies ordered events and ignores duplicates", () => {
     let state = uiReducer(initialState, { type: "snapshot", snapshot: snapshot() });
     const message: UiEvent = {

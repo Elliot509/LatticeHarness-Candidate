@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 // Tarball hygiene: the distributable must never carry credentials, install
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // patterns only; no real secret exists in this repo.
 
 let dirs: string[] = [];
+const execFileAsync = promisify(execFile);
 afterEach(() => {
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
   dirs = [];
@@ -29,14 +31,16 @@ const FORBIDDEN_PATHS = [
   "lattice-pack-",
   ".export-",
   "usage.jsonl",
+  "dist/p0-bundle",
+  "/runtime/electron",
 ];
 
 describe("distribution hygiene", () => {
-  it("packs without secrets, identities, clones, or future research", () => {
+  it("packs without secrets, identities, clones, or future research", async () => {
     // Windows runners expose npm only as npm.cmd through a shell; POSIX
     // runners spawn npm directly. Same helper the pack script uses.
     const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-    const out = execFileSync(npm, ["pack", "--dry-run", "--json"], {
+    const { stdout: out } = await execFileAsync(npm, ["pack", "--dry-run", "--json"], {
       encoding: "utf8",
       timeout: 120000,
       ...(process.platform === "win32" ? { shell: true } : {}),
@@ -51,5 +55,7 @@ describe("distribution hygiene", () => {
       expect(files.some((file) => file.includes(forbidden)), `tarball contains ${forbidden}`).toBe(false);
     }
     expect(files).toContain("dist/cli/main.js");
-  });
+  // Keep the runner deadline outside the existing bounded npm deadline.
+  // Packaging desktop runtimes must not block Vitest's worker event loop.
+  }, 125000);
 });

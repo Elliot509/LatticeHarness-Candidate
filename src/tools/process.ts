@@ -27,11 +27,8 @@ export const PROCESS_DEFINITION: ToolDefinition = {
       handle: { type: "string" },
       text: { type: "string" },
       timeoutMs: { type: "number" },
-      generation: { type: "number" },
-      realm: { type: "string" },
-      attemptId: { type: "string" },
     },
-    required: ["op", "generation"],
+    required: ["op"],
     additionalProperties: false,
   },
 };
@@ -79,14 +76,11 @@ async function terminateTree(child: ChildProcess): Promise<void> {
   if (process.platform === "win32") {
     if (child.pid !== undefined) {
       await new Promise<void>((resolve) => {
-        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-        killer.on("error", () => {
-          resolve();
-        });
-        killer.on("exit", () => {
-          resolve();
-        });
-        setTimeout(resolve, 5000);
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+        const timer = setTimeout(resolve, 5000);
+        const done = (): void => { clearTimeout(timer); resolve(); };
+        killer.once("error", done);
+        killer.once("exit", done);
       });
     }
     return;
@@ -110,12 +104,14 @@ function waitExit(child: ChildProcess, isClosed: () => boolean, timeoutMs: numbe
   if (isClosed()) return Promise.resolve(true);
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
+      child.off("close", onClose);
       resolve(false);
     }, timeoutMs);
-    child.once("close", () => {
+    const onClose = (): void => {
       clearTimeout(timer);
       resolve(true);
-    });
+    };
+    child.once("close", onClose);
   });
 }
 
@@ -127,6 +123,7 @@ export class ProcessSupervisor {
   // as the per-call args env, but bound at construction by the runtime).
   // Absent means no overlay: children get the allowlist base only.
   private readonly envOverlay: Record<string, string> | undefined;
+  private closing: Promise<Array<{ handle: string; result: ToolResult }>> | null = null;
 
   constructor(workspaceRoot: string, maxBytes = DEFAULT_MAX_BYTES, envOverlay?: Record<string, string>) {
     this.workspaceRoot = workspaceRoot;
@@ -150,6 +147,11 @@ export class ProcessSupervisor {
   }
 
   private spawn(args: Extract<ProcessOperation, { op: "spawn" }>): ToolResult {
+    if (this.processes.size >= 64) {
+      for (const [handle, record] of this.processes) { if (record.exited !== null) { this.processes.delete(handle); break; } }
+      if (this.processes.size >= 64) return toolFailure("process-capacity", "64 active supervised processes; observe or stop existing work before spawning", false);
+    }
+    if (this.closing !== null) return toolFailure("invalid-args", "supervisor is closing", false);
     if (typeof args.executable !== "string" || args.executable === "") {
       return toolFailure("invalid-args", "spawn requires an executable", false);
     }
@@ -195,9 +197,12 @@ export class ProcessSupervisor {
         record.truncated = true;
         return;
       }
-      store.push(chunk);
-      if (store === record.stdout) record.stdoutBytes += chunk.length;
-      else record.stderrBytes += chunk.length;
+      const available = this.maxBytes - record.stdoutBytes - record.stderrBytes;
+      const bounded = chunk.subarray(0, available);
+      if (bounded.length < chunk.length) record.truncated = true;
+      store.push(bounded);
+      if (store === record.stdout) record.stdoutBytes += bounded.length;
+      else record.stderrBytes += bounded.length;
     };
     child.stdout?.on("data", (chunk: Buffer) => {
       push(record.stdout, chunk);
@@ -239,6 +244,35 @@ export class ProcessSupervisor {
       return toolFailure("invalid-args", "stale generation: handle belongs to another executor generation", false);
     }
     return record;
+  }
+
+  // Observation for WAIT must not advance the tool's output cursors. An
+  // explicit later poll can still retrieve all output, including exit drain.
+  observe(handle: string, generation: number): ToolResult {
+    const found = this.lookup(handle, generation);
+    if (!("child" in found)) return found;
+    return {
+      status: found.exited === null ? "running" : "completed",
+      summary: found.exited === null ? "process running" : `process exited (code ${found.exited.code ?? "null"}, signal ${found.exited.signal ?? "none"})`,
+      detail: `stdout:\n${renderNew(found.stdout, 0).text}\nstderr:\n${renderNew(found.stderr, 0).text}${found.truncated ? "\n[output truncated at supervisor cap]" : ""}`,
+      complete: found.exited !== null, truncated: found.truncated,
+    };
+  }
+
+  waitForExit(handle: string, generation: number, signal: AbortSignal): Promise<void> {
+    const found = this.lookup(handle, generation);
+    if (!("child" in found) || found.exited !== null || signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = (): void => {
+        found.child.off("close", done);
+        found.child.off("error", done);
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      found.child.once("close", done);
+      found.child.once("error", done);
+      signal.addEventListener("abort", done, { once: true });
+    });
   }
 
   private async poll(handle: string, timeoutMs: number, generation: number): Promise<ToolResult> {
@@ -328,14 +362,10 @@ export class ProcessSupervisor {
     };
   }
 
-  async close(): Promise<void> {
-    for (const [handle, record] of this.processes) {
-      try {
-        await terminateTree(record.child);
-      } catch {
-        // Best effort during shutdown.
-      }
-      this.processes.delete(handle);
-    }
+  close(): Promise<Array<{ handle: string; result: ToolResult }>> {
+    this.closing ??= Promise.all([...this.processes].map(async ([handle, record]) => ({
+      handle, result: await this.stop(handle, record.generation),
+    })));
+    return this.closing;
   }
 }

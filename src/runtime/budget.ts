@@ -5,8 +5,17 @@ export interface BudgetGrant {
   // never consume these dimensions: they reserve/settle 0/0 and remain
   // identified, counted attempts in the ledger (see effects.ts), with their
   // own optional durable execution-activity limit (maxToolDispatches).
-  calls: number;
-  tokens: number;
+  calls: number | null;
+  tokens: number | null;
+}
+
+// Null is an explicit absence of a cumulative limit, never a large sentinel.
+export function exceedsLimit(usage: number, limit: number | null): boolean {
+  return limit !== null && usage > limit;
+}
+
+export function validLimit(limit: number | null): boolean {
+  return limit === null || (Number.isSafeInteger(limit) && limit > 0);
 }
 
 export interface BudgetUsage {
@@ -35,10 +44,10 @@ export class BudgetLedger {
   private readonly settledAttempts = new Set<string>();
 
   constructor(granted: BudgetGrant) {
-    if (!Number.isInteger(granted.calls) || granted.calls <= 0) {
+    if (!validLimit(granted.calls)) {
       throw new Error("granted.calls must be a positive integer");
     }
-    if (!Number.isInteger(granted.tokens) || granted.tokens <= 0) {
+    if (!validLimit(granted.tokens)) {
       throw new Error("granted.tokens must be a positive integer");
     }
     this.granted = { ...granted };
@@ -54,8 +63,8 @@ export class BudgetLedger {
 
   canReserve(request: BudgetUsage): boolean {
     return (
-      this.settled.calls + this.reserved.calls + request.calls <= this.granted.calls &&
-      this.settled.tokens + this.reserved.tokens + request.tokens <= this.granted.tokens
+      !exceedsLimit(this.settled.calls + this.reserved.calls + request.calls, this.granted.calls) &&
+      !exceedsLimit(this.settled.tokens + this.reserved.tokens + request.tokens, this.granted.tokens)
     );
   }
 
@@ -68,7 +77,7 @@ export class BudgetLedger {
     }
     if (!this.canReserve(request)) {
       throw new BudgetExceededError(
-        this.settled.calls + this.reserved.calls + request.calls > this.granted.calls
+        exceedsLimit(this.settled.calls + this.reserved.calls + request.calls, this.granted.calls)
           ? "calls"
           : "tokens",
       );

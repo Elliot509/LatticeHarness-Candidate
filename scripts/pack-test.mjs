@@ -6,6 +6,7 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { joinCommand, npmCommand, useShell } from "./npm-spawn.mjs";
@@ -50,7 +51,7 @@ function packedEntries(packJson) {
   };
 }
 
-const forbidden = [/\.env$/i, /^node_modules\//, /\.git\//, /\.sqlite$/i, /\.db$/i, /\.pdf$/i];
+const forbidden = [/\.env$/i, /^node_modules\//, /\.git\//, /\.sqlite$/i, /\.db$/i, /\.pdf$/i, /^dist\/p0-bundle\//];
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lattice-pack-"));
 try {
@@ -210,9 +211,17 @@ try {
   }
   try {
     if (uiUrl === undefined) fail("lattice ui did not report an address");
-    const home = await fetch(`${uiUrl}/`);
+    // Model direct top-level browser navigation. Node fetch overwrites
+    // Sec-Fetch-Mode, so this fixture uses the native HTTP client.
+    const home = await new Promise((resolve, reject) => {
+      const request = http.get(`${uiUrl}/`, { headers: { "Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" } }, response => {
+        response.resume();
+        response.on("end", () => resolve({ status: response.statusCode, cookie: response.headers["set-cookie"]?.[0] ?? "" }));
+      });
+      request.on("error", reject);
+    });
     if (home.status !== 200) fail(`ui index returned ${home.status}`);
-    const cookie = (home.headers.get("set-cookie") ?? "").split(";")[0];
+    const cookie = home.cookie.split(";")[0];
     if (cookie === "") fail("ui did not issue a session cookie");
     const created = await (
       await fetch(`${uiUrl}/api/commands`, {
