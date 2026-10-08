@@ -37,6 +37,14 @@ export interface WorkspaceSnapshot {
   durationMs: number;
 }
 
+export function sameObservedFile(before: Pick<fs.BigIntStats, "ino" | "dev">, opened: Pick<fs.BigIntStats, "ino" | "dev">, platform: NodeJS.Platform = process.platform): boolean {
+  // Node 22 on Windows can report path-stat dev=0 but handle-stat the
+  // volume serial. Keep the nonzero file ID check; do not ignore a known
+  // device mismatch or apply this exception to POSIX.
+  return before.ino === opened.ino && before.ino !== 0n
+    && (before.dev === opened.dev || (platform === "win32" && before.dev === 0n));
+}
+
 // Content evidence only at verification boundaries, never per read/search.
 // Coverage deliberately excludes generated/dependency directories. Symlink
 // destinations outside this tree and the test runner's environment are not
@@ -71,7 +79,7 @@ export async function workspaceVersion(root: string, options: { signal?: AbortSi
         const file = await fs.promises.open(full, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
         try {
           const opened = await file.stat({ bigint: true });
-          if (opened.ino !== before.ino || opened.dev !== before.dev || !opened.isFile()) throw new Error("file changed during content observation");
+          if (!sameObservedFile(before, opened) || !opened.isFile()) throw new Error("file changed during content observation");
           for (;;) {
             guard();
             const { bytesRead: count } = await file.read(buffer, 0, buffer.length, null);

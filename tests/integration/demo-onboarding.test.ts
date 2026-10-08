@@ -76,7 +76,9 @@ describe("demo project and session credential boundaries", () => {
   });
 
   it("resolves desktop storage without adopting the launch directory as a project", () => {
-    const options = desktopOptions({ XDG_DATA_HOME: "/tmp/lattice-user-data" });
-    expect(options).toEqual({ workspace: "", dataDir: "/tmp/lattice-user-data/lattice", browserDir: "/tmp/lattice-user-data/lattice/browser-state" });
+    const home = path.join(os.tmpdir(), "lattice-user-data");
+    const options = desktopOptions({ XDG_DATA_HOME: home, LOCALAPPDATA: home });
+    const dataDir = path.join(home, process.platform === "win32" ? "Lattice" : "lattice");
+    expect(options).toEqual({ workspace: "", dataDir, browserDir: path.join(dataDir, "browser-state") });
   });
 });

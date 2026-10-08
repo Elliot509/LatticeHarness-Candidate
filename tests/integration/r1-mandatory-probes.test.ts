@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createContract } from "../../src/runtime/contract.js";
 import {
@@ -57,7 +58,7 @@ describe("r1 ownership concurrency (two real processes)", () => {
   it("a live holder refuses every simultaneous racer; no split-brain", async () => {
     const dir = tmp("r1owner");
     const holderScript = [
-      "const m = await import(" + JSON.stringify(path.resolve("dist/storage/db.js")) + ");",
+      "const m = await import(" + JSON.stringify(pathToFileURL(path.resolve("dist/storage/db.js")).href) + ");",
       "const o = m.openLatticeDb(" + JSON.stringify(dir) + ");",
       'const c = m.claimOwnership(o.raw, "holder");',
       "console.log('holder gen ' + c.generation);",
@@ -81,7 +82,7 @@ describe("r1 ownership concurrency (two real processes)", () => {
       const racer = (i: number): Promise<string> =>
         new Promise((resolve) => {
           const script = [
-            "const m = await import(" + JSON.stringify(path.resolve("dist/storage/db.js")) + ");",
+            "const m = await import(" + JSON.stringify(pathToFileURL(path.resolve("dist/storage/db.js")).href) + ");",
             "const o = m.openLatticeDb(" + JSON.stringify(dir) + ");",
             "try {",
             `  const c = m.claimOwnership(o.raw, "racer-${i}");`,

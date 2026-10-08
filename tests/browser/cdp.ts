@@ -21,11 +21,16 @@ const DEFAULT_CANDIDATES = [
 ];
 
 function defaultCandidates(): string[] {
+  const candidates = process.platform === "win32"
+    ? [
+      path.join(process.env["PROGRAMFILES"] ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+    ] : DEFAULT_CANDIDATES;
   const fromEnv = process.env["CHROME_BIN"];
-  if (fromEnv !== undefined && fromEnv !== "" && !DEFAULT_CANDIDATES.includes(fromEnv)) {
-    return [fromEnv, ...DEFAULT_CANDIDATES];
+  if (fromEnv !== undefined && fromEnv !== "" && !candidates.includes(fromEnv)) {
+    return [fromEnv, ...candidates];
   }
-  return [...DEFAULT_CANDIDATES];
+  return [...candidates];
 }
 
 export function findChromium(candidates: string[] = defaultCandidates()): string | null {

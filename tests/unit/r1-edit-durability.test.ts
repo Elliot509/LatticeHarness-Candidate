@@ -34,6 +34,8 @@ describe("r1 edit durability", () => {
   it("RED: replace is atomic (old-or-new) and preserves file mode", async () => {
     const context = workspace({ "a.txt": "hello world\n" });
     fs.chmodSync(path.join(context.workspaceRoot, "a.txt"), 0o640);
+    // Windows exposes the read-only attribute rather than POSIX group bits.
+    const observedMode = fs.statSync(path.join(context.workspaceRoot, "a.txt")).mode & 0o777;
     const tool = new EditTool();
     const before = versionOf(context, "a.txt");
     const replaced = await tool.execute(
@@ -43,7 +45,7 @@ describe("r1 edit durability", () => {
     expect(replaced.status).toBe("completed");
     expect(fs.readFileSync(path.join(context.workspaceRoot, "a.txt"), "utf8")).toBe("hello there\n");
     // Mode preserved (atomic path copies mode to the temp file).
-    expect(fs.statSync(path.join(context.workspaceRoot, "a.txt")).mode & 0o777).toBe(0o640);
+    expect(fs.statSync(path.join(context.workspaceRoot, "a.txt")).mode & 0o777).toBe(observedMode);
     // No temp debris left behind.
     expect(fs.readdirSync(context.workspaceRoot).filter((f) => f.includes(".tmp") || f.endsWith(".new")).length).toBe(0);
   });

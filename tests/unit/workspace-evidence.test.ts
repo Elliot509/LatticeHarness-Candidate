@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultAcceptance, TaskAcceptance, workspaceVersion } from "../../src/runtime/acceptance.js";
+import { defaultAcceptance, sameObservedFile, TaskAcceptance, workspaceVersion } from "../../src/runtime/acceptance.js";
 
 const dirs: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -10,6 +10,14 @@ function workspace(): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(),
 const pass = { status: "completed" as const, summary: "exit 0", detail: "ok 1 - real fixture" };
 
 describe("content evidence at verification boundaries", () => {
+  it("handles Windows path-stat's missing device while rejecting swapped or unknown file IDs", () => {
+    const pathStat = { ino: 123n, dev: 0n }, handleStat = { ino: 123n, dev: 456n };
+    expect(sameObservedFile(pathStat, handleStat, "win32")).toBe(true);
+    expect(sameObservedFile(pathStat, handleStat, "linux")).toBe(false);
+    expect(sameObservedFile({ ino: 123n, dev: 789n }, handleStat, "win32")).toBe(false);
+    expect(sameObservedFile({ ino: 124n, dev: 0n }, handleStat, "win32")).toBe(false);
+    expect(sameObservedFile({ ino: 0n, dev: 0n }, { ino: 0n, dev: 456n }, "win32")).toBe(false);
+  });
   it.each(["bytes", "entries"])("verifies a project beyond the old %s ceiling", async kind => {
     const root = workspace();
     if (kind === "bytes") fs.writeFileSync(path.join(root, "large.bin"), Buffer.alloc(33 * 1024 * 1024));
