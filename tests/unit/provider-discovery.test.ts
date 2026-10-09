@@ -28,8 +28,8 @@ describe("model discovery", () => {
     expect(outcome).toEqual({
       ok: true,
       models: [
-        { id: "m1", displayName: null, ownedBy: "local" },
-        { id: "m2", displayName: "Two", ownedBy: null },
+        { id: "m1", displayName: null, ownedBy: "local", contextLength: null },
+        { id: "m2", displayName: "Two", ownedBy: null, contextLength: null },
       ],
       source: "models-endpoint",
     });

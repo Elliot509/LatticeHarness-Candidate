@@ -216,13 +216,15 @@ function connectionLabel(state: UiState): string {
   }
 }
 
-function UsageRing({ reserved, granted }: { reserved: number; granted: number }): JSX.Element {
-  const ratio = granted > 0 ? Math.min(1, reserved / granted) : 0;
+function UsageRing({ used, window }: { used: number | undefined; window: number | undefined }): JSX.Element {
+  const ratio = used !== undefined && window !== undefined ? Math.min(1, used / window) : 0;
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
-  const label = `Contexto usado: ${formatTokens(reserved)} de ${formatTokens(granted)}`;
+  const percent = used !== undefined && window !== undefined ? `${(used / window * 100).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` : "—";
+  const compact = (value: number): string => value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : String(value);
+  const label = `Contexto: ${used === undefined ? "—" : compact(used)} / ${window === undefined ? "—" : compact(window)} (${percent})`;
   return (
-    <span className="usagering" title={label} role="img" aria-label={label}>
+    <span className="usagering" title={`Entrada observada: ${used ?? "—"} tokens; janela nominal do modelo: ${window ?? "—"} tokens`} role="img" aria-label={label}>
       <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
         <circle cx="9" cy="9" r={radius} fill="none" strokeWidth="2.5" className="ring-track" />
         <circle
@@ -237,7 +239,7 @@ function UsageRing({ reserved, granted }: { reserved: number; granted: number })
           transform="rotate(-90 9 9)"
         />
       </svg>
-      <span className="usage-text">{formatTokens(reserved)}/{formatTokens(granted)}</span>
+      <span className="usage-text">{label}</span>
     </span>
   );
 }
@@ -296,7 +298,7 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
       <div className="topbar-side">
         {task !== null && (
           <details className="budgettag">
-            <summary>{task.budget.settledCalls} chamadas · {formatTokens(task.budget.settledTokens)} tokens observados</summary>
+            <summary>Diagnóstico</summary>
             <div className="budget-detail">
               <strong>Consumo acumulado da tarefa</strong>
               <span>Observado e liquidado: {task.budget.settledCalls} chamadas · {formatTokens(task.budget.settledTokens)} tokens</span>
@@ -304,17 +306,13 @@ export function Header({ api, state }: HeaderProps): JSX.Element {
               <span>Uso incompleto: {task.budget.uncertainUsageAttempts ?? 0} tentativas · reserva é estimativa, não teto do consumo incerto</span>
               <span>Limite de chamadas: {task.budget.grantedCalls ?? "sem limite configurado"}</span>
               <span>Limite de tokens: {task.budget.grantedTokens === null ? "sem limite configurado" : formatTokens(task.budget.grantedTokens)}</span>
-              <span>Contexto e custo: não informados. O provedor pode cobrar pelo uso.</span>
+              <span>O provedor pode cobrar pelo uso.</span>
             </div>
           </details>
         )}
         {task !== null && (
-          <span className="contexttag" title="Uso de contexto informado pelo core">
-            {task.contextUsage.known ? (
-              <UsageRing reserved={task.contextUsage.reservedTokens} granted={task.contextUsage.grantedTokens} />
-            ) : (
-              "contexto desconhecido"
-            )}
+          <span className="contexttag">
+            <UsageRing used={task.contextUsage.usedTokens} window={task.contextUsage.contextWindow} />
           </span>
         )}
         {task !== null && (

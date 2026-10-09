@@ -1513,6 +1513,9 @@ select { color-scheme: inherit; }
 .ring-value { stroke: var(--accent); }
 .usage-text { font-family: var(--font-mono); }
 
+/* Context remains visible at native-window and narrow viewport sizes. */
+.topbar .contexttag { display: flex; align-items: center; }
+
 /* Running indicator inside the conversation */
 
 .running-row {

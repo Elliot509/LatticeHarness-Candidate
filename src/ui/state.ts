@@ -192,6 +192,8 @@ function applyEvent(task: TaskSnapshot, event: UiEvent): TaskSnapshot | null {
       return { ...task, state: event.state, stateReason: event.reason, contractRevision: event.contractRevision, cut: event.seq };
     case "budget":
       return { ...task, budget: event.budget, cut: event.seq };
+    case "context":
+      return { ...task, contextUsage: event.contextUsage, cut: event.seq };
     case "resync":
       return task;
   }

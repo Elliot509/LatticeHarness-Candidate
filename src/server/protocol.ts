@@ -112,7 +112,7 @@ export interface TaskSnapshot {
   resumable: boolean;
   resumeBlockers: string[];
   budget: BudgetView;
-  contextUsage: { known: false } | { known: true; reservedTokens: number; grantedTokens: number };
+  contextUsage: ContextUsage;
   messages: MessageView[];
   tools: ToolActivityView[];
   verifications: VerificationView[];
@@ -121,6 +121,7 @@ export interface TaskSnapshot {
 }
 
 export type UiEvent =
+  | { seq: number; kind: "context"; contextUsage: ContextUsage }
   | { seq: number; kind: "message"; message: MessageView }
   | { seq: number; kind: "tool"; tool: ToolActivityView }
   | { seq: number; kind: "verification"; verification: VerificationView }
@@ -128,6 +129,12 @@ export type UiEvent =
   | { seq: number; kind: "state"; state: TaskState; reason: string; contractRevision: number }
   | { seq: number; kind: "budget"; budget: BudgetView }
   | { seq: number; kind: "resync"; cut: number };
+
+export type ContextUsage = ({ known: false; usedTokens?: number; contextWindow?: number }
+  | { known: true; usedTokens: number; contextWindow: number }) & {
+  provider?: string; endpoint?: string; model?: string; attemptId?: string;
+  capacitySource?: "models-endpoint.context_length"; capacityKind?: "nominal";
+};
 
 export type CommandKind = "create-task" | "start-task" | "steer" | "stop" | "select-model" | "set-key" | "resume-task" | "wake";
 

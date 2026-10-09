@@ -12,6 +12,8 @@ export interface DiscoveredModel {
   /** Optional display hint; never a substitute for the id. */
   displayName: string | null;
   ownedBy: string | null;
+  /** Provider-declared nominal window, never a guessed routing limit. */
+  contextLength: number | null;
 }
 
 export type DiscoveryOutcome =
@@ -23,10 +25,10 @@ export interface DiscoveryOptions {
   apiKey?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 15_000;
-const MAX_MODELS = 500;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
@@ -37,7 +39,8 @@ function normalizeModels(payload: unknown): DiscoveredModel[] | null {
   const data = root?.["data"];
   if (!Array.isArray(data)) return null;
   const models: DiscoveredModel[] = [];
-  for (const entry of data.slice(0, MAX_MODELS)) {
+  // Read the complete catalog: a manually entered model may be beyond 500.
+  for (const entry of data) {
     const record = asRecord(entry);
     const id = record?.["id"];
     if (typeof id !== "string" || id.trim() === "") continue;
@@ -47,6 +50,7 @@ function normalizeModels(payload: unknown): DiscoveredModel[] | null {
       id: id.trim(),
       displayName: typeof displayName === "string" && displayName.trim() !== "" ? displayName.trim() : null,
       ownedBy: typeof ownedBy === "string" && ownedBy.trim() !== "" ? ownedBy.trim() : null,
+      contextLength: typeof record?.["context_length"] === "number" && Number.isSafeInteger(record["context_length"]) && record["context_length"] > 0 ? record["context_length"] : null,
     });
   }
   return models;
@@ -77,7 +81,7 @@ export async function listModels(options: DiscoveryOptions): Promise<DiscoveryOu
         headers: {
           ...(options.apiKey !== undefined && options.apiKey.trim() !== "" ? { Authorization: `Bearer ${options.apiKey}` } : {}),
         },
-        signal: controller.signal,
+        signal: options.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, options.signal]),
       });
     } catch (error) {
       if (state.timedOut || (error instanceof Error && error.name === "AbortError")) {

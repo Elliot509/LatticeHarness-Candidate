@@ -66,7 +66,7 @@ function snapshot(state: TaskState): TaskSnapshot {
     resumable: state === "WAITING" || state === "BLOCKED" || state === "CANCELLED",
     resumeBlockers: state === "BLOCKED" ? ["configure the provider credential"] : [],
     budget: { grantedCalls: 50, grantedTokens: 200000, reservedCalls: state === "RUNNING" ? 1 : 0, reservedTokens: 0, settledCalls: 8, settledTokens: 12400 },
-    contextUsage: { known: true, reservedTokens: 18300, grantedTokens: 128000 },
+    contextUsage: { known: true, usedTokens: 18300, contextWindow: 128000 },
     messages: [{ id: "message-1", seq: 1, author: "user", text: "Validate every execution state.", recordedAt: "2026-09-13T13:00:01Z" }],
     tools: [{ id: "tool-2", seq: 2, tool: "exec", target: "npm test", status: toolStatus(state), summary: "[exec] observed project test execution", detail: null, version: null, complete: state !== "RUNNING" && state !== "CANCELLED", truncated: false, durationMs: state === "RUNNING" ? null : 842, recordedAt: "2026-09-13T13:00:02Z" }],
     verifications: [],

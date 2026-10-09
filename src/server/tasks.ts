@@ -1,4 +1,5 @@
 import { throwIfFault } from "../runtime/faults.js";
+import { ContextTracker } from "./context.js";
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -96,6 +97,8 @@ export class TaskManager {
   private draining = false;
   private closing: Promise<void> | null = null;
   private readonly nativeProjectSelection: boolean;
+  private readonly context: ContextTracker;
+  private readonly contextViews = new Set<string>();
 
   constructor(
     db: DatabaseSync,
@@ -105,6 +108,7 @@ export class TaskManager {
     nativeProjectSelection = false,
   ) {
     this.db = db;
+    this.context = new ContextTracker(db);
     this.currentWorkspace = serverWorkspace;
     this.defaultGrants = defaultGrants;
     this.productDir = productDir;
@@ -138,7 +142,7 @@ export class TaskManager {
       live.stopRequested = true;
       live.abort.abort();
     }
-    this.closing = Promise.all(runs.map((live) => live.done)).then(() => undefined).finally(() => { this.keys.clear(); });
+    this.closing = Promise.all([...runs.map((live) => live.done), this.context.close()]).then(() => undefined).finally(() => { this.keys.clear(); });
     return this.closing;
   }
 
@@ -146,6 +150,22 @@ export class TaskManager {
   providerApiKey(provider: string, baseUrl: string | null = null): string {
     if (!isKnownProviderId(provider)) throw new Error(`unsupported provider ${provider}`);
     return this.apiKeyFor(provider, baseUrl);
+  }
+
+  discoverModels(provider: string, baseUrl: string) {
+    return this.context.catalog(provider, baseUrl, this.providerApiKey(provider, baseUrl), true);
+  }
+
+  async refreshContext(taskId: string): Promise<void> {
+    if (this.draining) return;
+    this.contextViews.add(taskId);
+    try {
+      const manifest = this.readManifest(taskId);
+      if (findPreset(manifest.provider)?.keyRequired === true && !this.keyConfigured(manifest.provider, manifest.baseUrl)) return;
+      await this.context.refresh(taskId, manifest, this.providerApiKey(manifest.provider, manifest.baseUrl), () => {
+        this.emit(taskId, { seq: 0, kind: "context", contextUsage: this.context.read(taskId, this.readManifest(taskId)) });
+      });
+    } catch { /* Metadata failure must never change execution or task state. */ }
   }
 
   /**
@@ -215,12 +235,14 @@ export class TaskManager {
     const slot = this.credentialSlot(provider, baseUrl);
     requireCredentialTransport(slot.slice(provider.length + 1), key);
     this.keys.set(slot, key);
+    this.context.invalidate();
   }
 
   removeKey(provider: string): boolean {
     if (!isKnownProviderId(provider)) throw new Error("unsupported provider");
     let removed = false;
     for (const slot of this.keys.keys()) if (slot.startsWith(`${provider}:`)) removed = this.keys.delete(slot) || removed;
+    this.context.invalidate();
     return removed;
   }
 
@@ -601,7 +623,7 @@ export class TaskManager {
         this.acknowledgeSteering(taskId, binding.contractRevision);
         this.recordEvent(taskId, "composition", { provider: binding.provider, model: binding.model, baseUrl: binding.endpoint, applied: true, epoch: binding.compositionEpoch });
       },
-      afterRequestBound: () => { this.steerings.delete(taskId); this.emit(taskId, { seq: 0, kind: "resync", cut: this.seqs.get(taskId) ?? 0 }); },
+      afterRequestBound: () => { this.steerings.delete(taskId); this.emit(taskId, { seq: 0, kind: "resync", cut: this.seqs.get(taskId) ?? 0 }); this.emit(taskId, { seq: 0, kind: "context", contextUsage: this.context.read(taskId, this.readManifest(taskId)) }); },
       acceptanceVerifiers: [async (response) => {
         const check = await acceptance.check(response?.text);
         if (!check.complete) this.recordEvent(taskId, "acceptance-check", { ...check, revision: contract.revision });
@@ -729,6 +751,13 @@ export class TaskManager {
     }
     if (event.kind === "model-response") {
       this.emit(taskId, { seq: 0, kind: "budget", budget: this.readBudget(taskId) });
+      // model-response precedes synchronous receipt/usage settlement. Publish
+      // in the following microtask, never projecting the previous attempt as
+      // the new sample. No changes to Agent Loop sequencing or accounting.
+      queueMicrotask(() => {
+        this.emit(taskId, { seq: 0, kind: "context", contextUsage: this.context.read(taskId, this.readManifest(taskId)) });
+        if (this.contextViews.has(taskId)) void this.refreshContext(taskId);
+      });
       return;
     }
     if (event.kind === "tool-start" && event.tool !== undefined && event.attemptId !== undefined) {
@@ -1171,7 +1200,7 @@ export class TaskManager {
       resumable: gate.canResume,
       resumeBlockers: gate.blockers.map((blocker) => blocker.code),
       budget,
-      contextUsage: { known: false },
+      contextUsage: this.context.read(taskId, manifest),
       messages,
       tools,
       verifications,

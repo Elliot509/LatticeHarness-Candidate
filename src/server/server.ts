@@ -12,7 +12,7 @@ import {
 import { PROTOCOL_VERSION, type UiCommand } from "./protocol.js";
 import { TaskManager } from "./tasks.js";
 import { findPreset, isKnownProviderId, listPresets } from "../providers/presets.js";
-import { listModels, testConnection } from "../providers/discovery.js";
+import { testConnection } from "../providers/discovery.js";
 import { loadProductConfig, parseProductConfig, saveProductConfig } from "../productConfig.js";
 
 import { normalizeEndpoint } from "../providers/endpoint.js";
@@ -337,7 +337,7 @@ async function handle(
       response.end(JSON.stringify({ protocol: PROTOCOL_VERSION, providerId, baseUrl: effectiveBase, ...result }));
       return;
     }
-    const result = await listModels({ baseUrl: effectiveBase, apiKey });
+    const result = await tasks.discoverModels(providerId, effectiveBase);
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ protocol: PROTOCOL_VERSION, providerId, baseUrl: effectiveBase, ...result }));
     return;
@@ -443,6 +443,7 @@ async function handle(
       let body: string;
       try {
         body = JSON.stringify(tasks.snapshot(taskId));
+        void tasks.refreshContext(taskId);
       } catch (error) {
         response.writeHead(404, { "Content-Type": "application/json" });
         response.end(JSON.stringify({ error: error instanceof Error ? error.message : "unknown task" }));

@@ -27,6 +27,7 @@ export interface DiscoveredModelView {
   id: string;
   displayName: string | null;
   ownedBy: string | null;
+  contextLength?: number | null;
 }
 
 export type ModelsOutcome =
