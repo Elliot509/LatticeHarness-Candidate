@@ -147,8 +147,8 @@ describe("completion and exact tool arguments", () => {
 
   it("conservative defaults do not turn an arbitrary coding request into response-only acceptance", () => {
     expect(defaultAcceptance("Fix a bug and run tests")).toEqual(["tests-pass"]);
-    expect(defaultAcceptance("Create directory ../escape")).toEqual(["directory-exists:../escape"]);
+    expect(defaultAcceptance("Create directory ../escape")).toEqual(["clarification-required"]);
     expect(defaultAcceptance("Fix a bug and create directory Muse")).toEqual(["tests-pass"]);
-    expect(defaultAcceptance("Create directory Muse and delete the project")).toEqual(["tests-pass"]);
+    expect(defaultAcceptance("Create directory Muse and delete the project")).toEqual(["clarification-required"]);
   });
 });

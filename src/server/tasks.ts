@@ -23,7 +23,7 @@ import { runTaskLoop, type LoopOptions, type LoopStop } from "../runtime/loop.js
 import { buildToolset } from "../tools/registry.js";
 import { ProcessSupervisor } from "../tools/process.js";
 import { summarizeExecResult } from "../runtime/verify.js";
-import { TaskAcceptance, defaultAcceptance } from "../runtime/acceptance.js";
+import { TaskAcceptance, resolveAcceptance } from "../runtime/acceptance.js";
 import { OpenAiAdapter } from "../providers/openai.js";
 import { findPreset, isKnownProviderId } from "../providers/presets.js";
 import { resolveInScope } from "../platform/paths.js";
@@ -407,12 +407,13 @@ export class TaskManager {
     if (!isKnownProviderId(options.provider)) throw new Error("only a known provider preset is served over HTTP");
     const taskId = `task-${randomUUID()}`;
     const rootId = `root-${randomUUID()}`;
+    const acceptance = resolveAcceptance(options.objective, options.acceptance);
     const contract = createContract({
       taskId,
       rootId,
       objective: options.objective,
       scope: [resolved],
-      acceptanceCriteria: options.acceptance.length > 0 ? options.acceptance : defaultAcceptance(options.objective),
+      acceptanceCriteria: acceptance.criteria,
       obligations: ["preserve human work"],
       grants: [
         {
@@ -432,6 +433,7 @@ export class TaskManager {
       origin: "ui create-task",
     });
     this.writeContract(contract);
+    this.recordEvent(taskId, "acceptance-policy", { source: acceptance.source, policyVersion: acceptance.policyVersion, reason: acceptance.reason, revision: contract.revision });
     const runId = `run-${randomUUID()}`;
     this.db
       .prepare("INSERT INTO runs (run_id, session_id, root_id, task_id, manifest, created_at) VALUES (?, ?, ?, ?, ?, ?)")
@@ -471,6 +473,12 @@ export class TaskManager {
     if (this.draining || this.live.size !== 0 || current.state !== "READY") {
       return { accepted: false, commandId, reason: "denied", revision: contract.revision, state: current.state };
     }
+    const acceptance = new TaskAcceptance(contract.scope[0] ?? this.serverWorkspace, contract.acceptanceCriteria);
+    if (acceptance.clarificationReason !== null) {
+      this.recordEvent(taskId, "chat", { author: "agent", text: acceptance.clarificationReason });
+      this.setState(taskId, "NEEDS_INPUT", acceptance.clarificationReason);
+      return { accepted: true, commandId, taskId, revision: contract.revision, state: "NEEDS_INPUT" };
+    }
     const manifest = this.readManifest(taskId);
     const adapter = adapterOverride ?? this.buildAdapter(manifest.provider, manifest.baseUrl);
     const supervisor = new ProcessSupervisor(contract.scope[0] ?? this.serverWorkspace);
@@ -484,7 +492,6 @@ export class TaskManager {
       waitAbort: null,
     };
     this.live.set(taskId, live);
-    const acceptance = new TaskAcceptance(contract.scope[0] ?? this.serverWorkspace, contract.acceptanceCriteria);
     const surface: TaskSurface = {
       objective: contract.objective,
       acceptanceCriteria: [...contract.acceptanceCriteria],
@@ -597,6 +604,7 @@ export class TaskManager {
       afterRequestBound: () => { this.steerings.delete(taskId); this.emit(taskId, { seq: 0, kind: "resync", cut: this.seqs.get(taskId) ?? 0 }); },
       acceptanceVerifiers: [async (response) => {
         const check = await acceptance.check(response?.text);
+        if (!check.complete) this.recordEvent(taskId, "acceptance-check", { ...check, revision: contract.revision });
         if (check.complete) this.recordEvent(taskId, "acceptance", { ...check, criteria: contract.acceptanceCriteria, revision: contract.revision, observedAt: new Date().toISOString() });
         return check;
       }],

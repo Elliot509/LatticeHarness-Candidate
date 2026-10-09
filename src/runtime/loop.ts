@@ -109,7 +109,14 @@ export type LoopEvent =
   | { kind: "stop"; decision: LoopDecision; reason: string };
 
 function actionFingerprint(tool: string, argsJson: string): string {
-  return `${tool}:${argsJson}`;
+  const parsed = parseToolArgs(argsJson);
+  return `${tool}:${parsed.ok ? JSON.stringify(canonicalObservation(parsed.value)) : argsJson}`;
+}
+
+function canonicalObservation(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalObservation);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]: [string, unknown]) => [key, canonicalObservation(item)]));
+  return value;
 }
 
 function isPromise(value: unknown): value is Promise<{ wait: WaitRequest } | { woke: { text: string } } | null> {
@@ -448,12 +455,21 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
       evidence.push({ id: `ev-${evidence.length + 1}`, text: summary.text });
       if (summary.outcome === "unknown") return stop("ESCALATE", "tool effect UNKNOWN; reconcile before further work", iterations, modelCalls, toolDispatches, options);
       if (call.name === "edit" && summary.outcome === "confirmed") editRevision += 1;
-      const observedVersion = (JSON.parse(summary.detailJson) as { version?: unknown }).version ?? null;
-      if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), JSON.stringify([summary.text, observedVersion]))) return noProgress();
+      const observation = JSON.parse(summary.detailJson) as { version?: unknown; observationKey?: unknown };
+      if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), JSON.stringify([observation.observationKey ?? summary.text, observation.version ?? null]))) {
+        // A verified outcome wins over a repeat counter, but UNKNOWN above
+        // still exits before this check and unresolved effects still gate it.
+        if (options.verifyAfterTools === true) {
+          const verification = await checkCompletion(options);
+          if (verification.complete) return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
+        }
+        return noProgress();
+      }
     }
     if (options.verifyAfterTools === true) {
       const verification = await checkCompletion(options);
       if (verification.complete) return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
+      options.taskSurface.lastError = verification.reason;
     }
   }
 }
@@ -532,6 +548,7 @@ async function invokeTool(
       outputTruncated: (result.detail?.length ?? 0) > 64 * 1024 || result.truncated === true,
       version: result.version ?? null,
       afterVersion: result.version ?? null,
+      observationKey: result.observationKey ?? null,
     });
     if (result.status === "unknown" || result.effectUncertain === true) {
       return { outcome: "unknown", text, detailJson, handleId: result.handleId };

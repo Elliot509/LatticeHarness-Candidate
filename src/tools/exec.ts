@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { buildChildEnv, toolEnvOverlay } from "../platform/childEnv.js";
 import type { ToolDefinition } from "../providers/types.js";
 import { resolveInScope } from "../platform/paths.js";
@@ -264,10 +265,12 @@ export class ExecTool implements Tool<ExecArgs> {
     }
     const code = child.exitCode;
     const out = renderOutput(stdoutChunks, stderrChunks, truncated.stdout, truncated.stderr);
+    const observationKey = createHash("sha256").update(JSON.stringify([code, child.signalCode, out, truncated.stdout, truncated.stderr])).digest("hex");
     if (code === null) {
       return {
         status: "completed",
         summary: `terminated by signal ${child.signalCode ?? "unknown"} in ${durationMs}ms (cwd ${cwd})`,
+        observationKey,
         detail: out,
         truncated: truncated.stdout || truncated.stderr,
         errorKind: "non-zero-exit",
@@ -277,6 +280,7 @@ export class ExecTool implements Tool<ExecArgs> {
     return {
       status: "completed",
       summary: `exit ${code} in ${durationMs}ms (cwd ${cwd})`,
+      observationKey,
       detail: out,
       truncated: truncated.stdout || truncated.stderr,
       ...(code !== 0 ? { errorKind: "non-zero-exit", errorRetryable: false } : {}),

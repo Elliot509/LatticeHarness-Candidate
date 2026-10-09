@@ -7,24 +7,65 @@ import { VerifyLedger, summarizeExecResult } from "./verify.js";
 
 export type AcceptancePredicate =
   | { kind: "directory-exists" | "file-exists"; path: string }
-  | { kind: "tests-pass" | "response" };
+  | { kind: "tests-pass" | "response" | "clarification-required" };
+
+const LOCAL_LOCATION = String.raw`(?:(?:dentro\s+(?:desta|dessa|deste|desse|esta|essa|este|esse))|(?:nesta|nessa|neste|nesse|no))\s+(?:pasta|diret[oó]rio|lugar|projeto)|aqui`;
+const CLARIFY = "Defina um alvo e um critério explícito para esta criação; operações adicionais ou localização ambígua precisam de confirmação.";
+
+export interface AcceptanceResolution {
+  criteria: string[];
+  source: "explicit" | "default";
+  policyVersion: "acceptance-2";
+  reason: string;
+}
+
+// A bounded grammar for ONE creation, not a shell parser or general intent
+// classifier. Location clauses may only refer to the selected workspace.
+// Unconsumed text is a material obligation: never discard it to infer success.
+function creationCriterion(objective: string): string | null {
+  const creation = /^(?:por favor[, ]+)?(?:cri[ea]|criar|create)\s+(?:(?:um|uma|o|a|an?|the)\s+)?(pastas?|diret[oó]rios?|directories|directory|folders?|arquivos?|files?)(?:\s+([\s\S]*))?$/iu.exec(objective.trim().replace(/[.!?]+$/u, ""));
+  if (!creation) return null;
+  const noun = creation[1] ?? "";
+  if (/s$/iu.test(noun) || /[;\r\n]/u.test(objective)) return "clarification-required";
+  let rest = (creation[2] ?? "").trim().replace(/[.!?]+$/u, "").trim();
+  // Confirming the same existence adds no separate effect. No other action
+  // following a conjunction is silently reduced to a single creation.
+  rest = rest.replace(/,?\s+e\s+confirme\s+(?:que\s+(?:ela|ele|a\s+pasta|o\s+diret[oó]rio|o\s+arquivo)\s+existe|(?:a|sua)\s+exist[eê]ncia)$/iu, "");
+  const leading = new RegExp(`^(?:${LOCAL_LOCATION})\\s+`, "iu");
+  const trailing = new RegExp(`\\s+(?:${LOCAL_LOCATION})$`, "iu");
+  if (leading.test(rest) && trailing.test(rest)) return "clarification-required";
+  rest = rest.replace(leading, "").replace(trailing, "");
+  if (/^(?:chamad[ao]|named|called|nome|com\s+o\s+nome|que\s+tenha\s+o\s+nome)$/iu.test(rest)) return "clarification-required";
+  rest = rest.replace(/^(?:(?:que\s+tenha\s+o\s+)?nome\s+(?:de\s+)?|chamad[ao]\s+|named\s+|called\s+|(?:com\s+o\s+nome|with\s+the\s+name)\s+(?:de\s+)?)/iu, "");
+  const named = /^(?:"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`|([^\s"'`<>]+))$/u.exec(rest);
+  const target = named?.slice(1).find(Boolean);
+  // No environment expansion, absolute paths, traversal or inferred shell
+  // syntax. Explicit criteria still use the canonical runtime scope check.
+  if (!target || target.trim() !== target || /[<>|;&$():\r\n\0]/u.test(target)
+    || path.posix.isAbsolute(target) || path.win32.isAbsolute(target)
+    || target.split(/[/\\]/u).some(part => part === ".." || part === "")
+    || target.split(/[/\\]/u).every(part => part === ".")) return "clarification-required";
+  return `${/^(?:arquivo|file)$/iu.test(noun) ? "file" : "directory"}-exists:${target}`;
+}
+
+export function resolveAcceptance(objective: string, explicit: readonly string[] = []): AcceptanceResolution {
+  // Do not run heuristics at all when the human supplied criteria.
+  if (explicit.length > 0) return { criteria: [...explicit], source: "explicit", policyVersion: "acceptance-2", reason: "user-defined criteria" };
+  const creation = creationCriterion(objective);
+  if (creation !== null) return { criteria: [creation], source: "default", policyVersion: "acceptance-2", reason: creation === "clarification-required" ? "filesystem creation needs an explicit target or criterion" : "single bounded filesystem creation" };
+  if (/\b(expli(?:que|car)|explain|anal[yi]s[ei]|resuma|summari[sz]e|inspect|inspecione|read|leia|diagn[oó]stico)\b/iu.test(objective)) return { criteria: ["response"], source: "default", policyVersion: "acceptance-2", reason: "analysis response" };
+  return { criteria: ["tests-pass"], source: "default", policyVersion: "acceptance-2", reason: "coding verification" };
+}
 
 export function defaultAcceptance(objective: string): string[] {
-  // Only narrow, explicit requests acquire a filesystem predicate. Ambiguous
-  // objectives keep the coding verifier or a response criterion, never an
-  // inferred arbitrary shell command or a model-generated success oracle.
-  const simpleObjective = objective.trim().replace(/\s+(?:neste|nesse|no)\s+projeto[.!]?$/iu, "");
-  const named = /(pasta|diret[oó]rio|directory|folder|arquivo|file)\s+(?:(?:dentro.*?\s+)?(?:que\s+tenha\s+o\s+)?nome\s+(?:de\s+)?|(?:chamad[ao]|named|called)\s+|(?:com\s+o\s+nome\s+)?)["'`]?([^\s"'`<>]+)["'`]?\s*[.!]?$/iu.exec(simpleObjective);
-  const singleCreation = /^(?:por favor[, ]+)?(?:cri[ea]|criar|create|mkdir)\b/iu.test(objective.trim()) && !/(?:[;\n]|\s(?:and|e|tamb[eé]m|also)\s)/iu.test(objective);
-  if (singleCreation && named?.[2]) return [`${/^(?:arquivo|file)$/iu.test(named[1] ?? "") ? "file" : "directory"}-exists:${named[2].replace(/[.!]$/, "")}`];
-  if (/\b(expli(?:que|car)|explain|anal[yi]s[ei]|resuma|summari[sz]e|inspect|inspecione|read|leia|diagn[oó]stico)\b/iu.test(objective)) return ["response"];
-  return ["tests-pass"];
+  return resolveAcceptance(objective).criteria;
 }
 
 function predicate(text: string): AcceptancePredicate | null {
   const match = /^(directory-exists|file-exists):(.+)$/u.exec(text);
   if (match?.[1] && match[2]) return { kind: match[1] as "directory-exists" | "file-exists", path: match[2] };
   if (text === "response") return { kind: "response" };
+  if (text === "clarification-required") return { kind: "clarification-required" };
   if (text === "tests-pass" || /^(?:project test suite passes|tests pass|task completed as verified)$/iu.test(text)) return { kind: "tests-pass" };
   return null;
 }
@@ -149,11 +190,14 @@ export class TaskAcceptance {
 
   get hasFilesystemPredicate(): boolean { return this.checks.some((check) => check?.kind === "directory-exists" || check?.kind === "file-exists"); }
 
+  get clarificationReason(): string | null { return this.checks.some(check => check?.kind === "clarification-required") ? CLARIFY : null; }
+
   async check(finalText?: string): Promise<{ complete: boolean; reason: string }> {
     const observed: string[] = [];
     let current: WorkspaceSnapshot | null = null;
     for (const [index, check] of this.checks.entries()) {
       if (check === null) return { complete: false, reason: `criterion needs an explicit verifier: ${this.criteria[index]}` };
+      if (check.kind === "clarification-required") return { complete: false, reason: CLARIFY };
       if (check.kind === "directory-exists" || check.kind === "file-exists") {
         const target = resolveInScope(this.root, check.path);
         if (target === null) return { complete: false, reason: `acceptance target escapes the workspace: ${check.path}` };

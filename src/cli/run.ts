@@ -19,7 +19,7 @@ import { HandleWaiter } from "../runtime/wait.js";
 import { runTaskLoop, type LoopOptions } from "../runtime/loop.js";
 import { claimOwnership, openLatticeDb } from "../storage/db.js";
 import { VerifyLedger } from "../runtime/verify.js";
-import { TaskAcceptance, defaultAcceptance } from "../runtime/acceptance.js";
+import { TaskAcceptance, resolveAcceptance } from "../runtime/acceptance.js";
 import { FakeProvider, type FakeScriptStep } from "../providers/fake.js";
 import { OpenAiAdapter } from "../providers/openai.js";
 import { isKnownProviderId } from "../providers/presets.js";
@@ -147,7 +147,8 @@ function resolveTaskTarget(
   emit: (line: string) => void,
 ): ResolvedTarget | null {
   if (options.resumeTaskId === undefined) {
-    const acceptance = options.acceptance.length > 0 ? options.acceptance : defaultAcceptance(options.task);
+    const resolution = resolveAcceptance(options.task, options.acceptance);
+    const acceptance = resolution.criteria;
     const contract = createContract({
       taskId: `task-${randomUUID()}`,
       rootId: `root-${randomUUID()}`,
@@ -173,6 +174,7 @@ function resolveTaskTarget(
       origin: "cli run",
     });
     persistContract(db, contract);
+    recordTaskEvent(db, contract.taskId, "acceptance-policy", { source: resolution.source, policyVersion: resolution.policyVersion, reason: resolution.reason, revision: contract.revision });
     const { sessionId } = openSession(db, contract.rootId);
     const runId = openRun(db, {
       sessionId,
@@ -257,6 +259,12 @@ async function runResolvedLoop(
   emit: (line: string) => void,
 ): Promise<number> {
   const { contract, taskSurface, sessionId, runId } = resolved;
+  const acceptance = new TaskAcceptance(workspace, contract.acceptanceCriteria);
+  if (acceptance.clarificationReason !== null) {
+    recordTaskEvent(dbRaw, contract.taskId, "task-state", { state: "NEEDS_INPUT", reason: acceptance.clarificationReason });
+    emit(`lattice: ASK: ${acceptance.clarificationReason}`);
+    return 2;
+  }
   let provider: ProviderAdapter;
   try {
     provider = selectProvider({
@@ -288,7 +296,6 @@ async function runResolvedLoop(
       },
       contract.obligations[0] ?? "complete the task",
     );
-    const acceptance = new TaskAcceptance(workspace, contract.acceptanceCriteria);
     const loopOptions: LoopOptions = {
       db: dbRaw,
       provider,

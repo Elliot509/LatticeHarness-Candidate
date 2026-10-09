@@ -20,6 +20,9 @@ export interface ToolResult {
   errorKind?: string;
   errorRetryable?: boolean;
   effectUncertain?: boolean;
+  // Executor-produced identity of substantive observed output. Presentation
+  // metadata (e.g. elapsed milliseconds) must not count as new progress.
+  observationKey?: string;
 }
 
 export interface ToolContext {
