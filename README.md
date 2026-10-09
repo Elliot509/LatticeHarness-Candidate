@@ -25,6 +25,7 @@ processes; the conversation is one view of that work.
 - OpenAI-compatible provider configuration, model discovery/manual IDs, guidance and
   model switching. Active and pending selections are distinct.
 - A web UI and an Electron desktop shell with a native project chooser.
+- A context-window indicator tied to actual provider metadata and observed input.
 
 There is one execution engine. MCP, subagents, semantic memory, a universal planner
 and a general prompt-injection defense are not current capabilities. The retired
@@ -104,18 +105,27 @@ bundle and isolated launch instructions are delivered separately to its owner.
 
    > Crie uma pasta chamada TesteMuse dentro deste projeto e confirme que ela existe.
 
-6. Expand **Critério de conclusão opcional** and enter
-   `directory-exists:TesteMuse`. This removes linguistic ambiguity. Optional call
-   and cumulative token limits are separate controls.
+6. For this recognized, simple creation request, leave the optional criterion
+   blank: Lattice derives `directory-exists:TesteMuse` and checks the filesystem.
+   To specify it yourself, expand **Critério de conclusão opcional** and enter
+   that criterion. Explicit criteria take precedence; ambiguous or compound
+   creation requests need an explicit target/criterion instead of silently
+   discarding additional work. Optional call and cumulative token limits are
+   separate controls.
 7. Start the task. Inspect the original objective, tool activity, output and
    acceptance result. Expect the target directory to exist and state **Concluído**
    (`COMPLETED`); command exit 0 or the model saying “done” alone is insufficient.
 8. Close and reopen to inspect retained history. Reenter the key for a new session.
    **Interromper** cancels work; it must not be interpreted as successful completion.
 
-Local fixtures have exercised tool use and verification without paid inference.
-**Muse/OpenRouter real inference remains a human test**, not a claimed successful
-provider qualification. If an effect is `UNKNOWN`, inspect it before retrying.
+Local fixtures exercise tool use and verification without paid inference. A
+human-run OpenRouter trial with `meta/muse-spark-1.3-contributor` successfully
+completed the objective `Crie uma pasta chamada "Python" dentro desse lugar.`:
+one model call, the directory created, and `directory-exists:Python` satisfied,
+without the previous loop. This is one successful real trial, not a general
+certification of Muse quality, reliability or availability. No additional paid
+inference is needed for the regression suite. If an effect is `UNKNOWN`, inspect
+it before retrying.
 
 ## Primeiro uso em português
 
@@ -124,8 +134,11 @@ seu runtime. No aplicativo novo: escolha uma pasta descartável, configure
 OpenRouter, insira a chave somente no campo local e selecione o ID exato do modelo
 Muse disponível na sua conta. Copie a tarefa e o critério do tutorial acima.
 Veja as ferramentas e a verificação antes de considerar **Concluído** um sucesso.
-O histórico persiste; a chave de sessão não. Windows/Ubuntu e inferência paga ainda
-exigem suas próprias validações. Não há link de binário público nesta revisão.
+O histórico persiste; a chave de sessão não. Houve um ensaio real bem-sucedido
+com `meta/muse-spark-1.3-contributor` pelo OpenRouter: uma chamada, pasta `Python`
+criada e critério satisfeito, sem looping. Isso não certifica o modelo em geral.
+Windows/Ubuntu continuam exigindo suas próprias validações do aplicativo nativo.
+Não há link de binário público nesta revisão.
 
 ## Architecture
 
@@ -158,6 +171,10 @@ agent engine.
 
 ### Verification and large projects
 
+- Recognized single directory/file creation requests can derive a filesystem
+  criterion automatically. Explicit criteria are preserved; ambiguous or compound
+  creation requests ask for clarification. A satisfied filesystem criterion can
+  finish after tool execution without another model call or TAP/Node test counts.
 - `directory-exists:path` / `file-exists:path`: inspect the actual contained target,
   including a preexisting target; no TAP requirement for directory creation.
 - `tests-pass`: recognized TAP or Node test summary, a clean exit, and matching
@@ -182,6 +199,22 @@ verify a smaller filesystem task without pretending that whole-project tests
 were certified. Commands that generate source-visible artifacts may require a
 fresh run after those artifacts settle. Tests are not proof of their own quality
 or resistance to intentional modification.
+
+### Context indicator
+
+The main bar shows `Contexto: used / window (%)`. Capacity comes from the real
+provider's model metadata, such as `context_length`, bound to the effective
+provider, endpoint and model. If only a nominal model capacity is supplied,
+that is the capacity displayed; no effective route limit is invented.
+
+Usage is the observed input of the latest confirmed, completed matching call
+(`usage.prompt_tokens` where supplied), including cached input once. It is not
+cumulative task usage, output tokens or a reservation. Model/endpoint changes
+update the binding and capacity; confirmed values survive task reopening.
+Missing or unreliable values show `—`, and a cancelled/unknown call does not
+replace confirmed input. Displayed compact numbers and percentages are rounded;
+exact counts are available in the indicator tooltip. Metadata lookup makes no
+inference call. Accumulated accounting remains available under **Diagnóstico**.
 
 ## Limits, security and privacy
 

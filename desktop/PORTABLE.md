@@ -33,7 +33,10 @@ then **Modelo / Configurar**. Choose the provider, enter the exact model ID
 manually (or list models), and configure the key in the session credential field.
 Click **Usar este modelo**. For an absent disposable target, use the objective
 "Crie uma pasta chamada TesteMuse dentro deste projeto e confirme que ela existe."
-Open **Critério de conclusão opcional** and enter `directory-exists:TesteMuse`.
+For this recognized simple creation, the optional criterion can stay blank; the
+filesystem predicate is derived automatically. Alternatively, open **Critério de
+conclusão opcional** and enter `directory-exists:TesteMuse`. Explicit criteria
+always take precedence; ambiguous/compound creations require clarification.
 Start, inspect tools and the filesystem observation, and expect **Concluído**.
 The project root is
 shown below the configuration controls. Project selection is session-only;
@@ -54,7 +57,15 @@ Ubuntu setup, an administrator can remove the exact `/opt/lattice-friday-demo`
 prefix and `/usr/share/applications/lattice-friday.desktop`. Retain the data
 directory to keep history, or remove it explicitly if you intend to delete data.
 
-No real hosted/local model was used to validate this build. The first real
-OpenRouter/Muse test is human-driven. The exact model ID must be selected at test
-time; no Muse identifier is built in. Provider-specific high/xhigh reasoning
-options are not currently exposed by this build.
+A human-run OpenRouter trial with `meta/muse-spark-1.3-contributor` completed
+`Crie uma pasta chamada "Python" dentro desse lugar.` in one model call, with
+the directory created and `directory-exists:Python` satisfied, without looping.
+This is one successful real trial, not general Muse certification. Automated
+regressions use fixtures and do not require paid inference. The exact model ID
+must be selected at test time; no Muse identifier is built in. Provider-specific
+high/xhigh reasoning options are not currently exposed by this build.
+
+The main bar shows `Contexto: used / window (%)` from the matching call's observed
+input and actual model metadata (`context_length` when supplied). Cache is included
+once; cumulative task tokens and reservations are separate diagnostics. Missing
+values show `—`; a nominal capacity is not a guaranteed effective route limit.
