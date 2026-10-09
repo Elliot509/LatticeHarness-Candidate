@@ -18,6 +18,9 @@ describe("content evidence at verification boundaries", () => {
     expect(sameObservedFile({ ino: 124n, dev: 0n }, handleStat, "win32")).toBe(false);
     expect(sameObservedFile({ ino: 0n, dev: 0n }, { ino: 0n, dev: 456n }, "win32")).toBe(false);
   });
+  // Setup creates up to 10,001 files, then prepare/observe/check each make
+  // an independently capped observation. Budget the whole fixture separately;
+  // the production 30-second deadline and every assertion remain unchanged.
   it.each(["bytes", "entries"])("verifies a project beyond the old %s ceiling", async kind => {
     const root = workspace();
     if (kind === "bytes") fs.writeFileSync(path.join(root, "large.bin"), Buffer.alloc(33 * 1024 * 1024));
@@ -26,7 +29,7 @@ describe("content evidence at verification boundaries", () => {
     await verifier.prepare("exec");
     await verifier.observe("exec", "test fixture", pass);
     expect((await verifier.check()).complete).toBe(true);
-  }, 30_000);
+  }, 120_000);
 
   it("frames path, kind, mode, size and content so the old concatenation collision differs", async () => {
     const a = workspace(), b = workspace();
