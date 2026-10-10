@@ -4,18 +4,20 @@ import { createHash } from "node:crypto";
 import { resolveInScope } from "../platform/paths.js";
 import type { ToolResult } from "../tools/types.js";
 import { VerifyLedger, summarizeExecResult } from "./verify.js";
+import type { DirectoryPage, DirectoryEntry } from "../tools/directory.js";
 
 export type AcceptancePredicate =
   | { kind: "directory-exists" | "file-exists"; path: string }
+  | { kind: "directory-listing"; path: string; recursive: boolean; filter: "all" | "files" | "directories" }
   | { kind: "tests-pass" | "response" | "clarification-required" };
 
-const LOCAL_LOCATION = String.raw`(?:(?:dentro\s+(?:desta|dessa|deste|desse|esta|essa|este|esse))|(?:nesta|nessa|neste|nesse|no))\s+(?:pasta|diret[oó]rio|lugar|projeto)|aqui`;
-const CLARIFY = "Defina um alvo e um critério explícito para esta criação; operações adicionais ou localização ambígua precisam de confirmação.";
+const LOCAL_LOCATION = String.raw`(?:(?:dentro\s+(?:desta|dessa|deste|desse|esta|essa|este|esse))|(?:nesta|nessa|neste|nesse|no))\s+(?:pasta|diret[oó]rio|lugar|projeto|ambiente)|aqui`;
+const CLARIFY = "Defina um alvo, escopo e critério explícitos; operações adicionais ou localização ambígua precisam de confirmação.";
 
 export interface AcceptanceResolution {
   criteria: string[];
   source: "explicit" | "default";
-  policyVersion: "acceptance-2";
+  policyVersion: "acceptance-3";
   reason: string;
 }
 
@@ -48,13 +50,27 @@ function creationCriterion(objective: string): string | null {
   return `${/^(?:arquivo|file)$/iu.test(noun) ? "file" : "directory"}-exists:${target}`;
 }
 
+// Only a complete, local inventory request is eligible. A conjunction, named
+// external location or additional obligation is not silently discarded.
+function listingCriterion(objective: string): string | null {
+  const text = objective.trim().replace(/[.!?]+$/u, "").replace(/^por favor[, ]+/iu, "");
+  const match = /^(?:(?:me\s+)?(?:liste|listar|mostre|mostrar|list|show)\s+(?:(?:os|as|todos\s+os|todas\s+as)\s+)?(tudo|arquivos|diret[oó]rios|pastas|files|directories|entries)(?:\s+que\s+(?:est[aá]|est[aã]o|existem|existe))?\s+(aqui|(?:nessa|nesta|dessa|desta|nesse|neste|desse|deste|na|no)\s+(?:pasta|diret[oó]rio|projeto|lugar))|quais\s+(arquivos|diret[oó]rios|pastas)\s+(?:existem|est[aã]o)\s+(aqui|(?:nessa|nesta|nesse|neste)\s+(?:pasta|diret[oó]rio|projeto)))(?:\s+(recursivamente|recursive(?:ly)?))?$/iu.exec(text);
+  if (match === null) return null;
+  const noun = match[1] ?? match[3] ?? "";
+  const filter = /^(?:arquivos|files)$/iu.test(noun) ? "files" : /^(?:diret[oó]rios|pastas|directories)$/iu.test(noun) ? "directories" : "all";
+  return `directory-listing:${filter}:${match[5] === undefined ? "immediate" : "recursive"}:.`;
+}
+
 export function resolveAcceptance(objective: string, explicit: readonly string[] = []): AcceptanceResolution {
   // Do not run heuristics at all when the human supplied criteria.
-  if (explicit.length > 0) return { criteria: [...explicit], source: "explicit", policyVersion: "acceptance-2", reason: "user-defined criteria" };
+  if (explicit.length > 0) return { criteria: [...explicit], source: "explicit", policyVersion: "acceptance-3", reason: "user-defined criteria" };
   const creation = creationCriterion(objective);
-  if (creation !== null) return { criteria: [creation], source: "default", policyVersion: "acceptance-2", reason: creation === "clarification-required" ? "filesystem creation needs an explicit target or criterion" : "single bounded filesystem creation" };
-  if (/\b(expli(?:que|car)|explain|anal[yi]s[ei]|resuma|summari[sz]e|inspect|inspecione|read|leia|diagn[oó]stico)\b/iu.test(objective)) return { criteria: ["response"], source: "default", policyVersion: "acceptance-2", reason: "analysis response" };
-  return { criteria: ["tests-pass"], source: "default", policyVersion: "acceptance-2", reason: "coding verification" };
+  if (creation !== null) return { criteria: [creation], source: "default", policyVersion: "acceptance-3", reason: creation === "clarification-required" ? "filesystem creation needs an explicit target or criterion" : "single bounded filesystem creation" };
+  const listing = listingCriterion(objective);
+  if (listing !== null) return { criteria: [listing], source: "default", policyVersion: "acceptance-3", reason: "bounded directory inventory; immediate children unless recursion explicitly requested" };
+  if (/^(?:por favor[, ]+)?(?:(?:me\s+)?(?:liste|listar|mostre|mostrar|list|show)\b|quais\s+(?:arquivos|diret[oó]rios|pastas)\b)/iu.test(objective.trim()) && !/\b(?:corrija|modifique|implemente|apague|remova|crie|execute)\b/iu.test(objective)) return { criteria: ["clarification-required"], source: "default", policyVersion: "acceptance-3", reason: "inventory scope or additional obligations need clarification" };
+  if (/^(?:por favor[, ]+)?(?:expli(?:que|car)|explain|anal[yi]s[ei]|resuma|summari[sz]e|inspect|inspecione|read|leia|diagn[oó]stico)\b/iu.test(objective.trim()) && !/\b(?:corrija|modifique|implemente|apague|remova|crie)\b/iu.test(objective)) return { criteria: ["response"], source: "default", policyVersion: "acceptance-3", reason: "analysis response" };
+  return { criteria: ["tests-pass"], source: "default", policyVersion: "acceptance-3", reason: "coding verification" };
 }
 
 export function defaultAcceptance(objective: string): string[] {
@@ -62,6 +78,8 @@ export function defaultAcceptance(objective: string): string[] {
 }
 
 function predicate(text: string): AcceptancePredicate | null {
+  const listing = /^directory-listing:(all|files|directories):(immediate|recursive):(.+)$/u.exec(text);
+  if (listing?.[1] && listing[3]) return { kind: "directory-listing", filter: listing[1] as "all" | "files" | "directories", recursive: listing[2] === "recursive", path: listing[3] };
   const match = /^(directory-exists|file-exists):(.+)$/u.exec(text);
   if (match?.[1] && match[2]) return { kind: match[1] as "directory-exists" | "file-exists", path: match[2] };
   if (text === "response") return { kind: "response" };
@@ -158,6 +176,7 @@ export class TaskAcceptance {
   private readonly checks: Array<AcceptancePredicate | null>;
   private readonly root: string;
   private readonly criteria: readonly string[];
+  private readonly inventories = new Map<string, { page: DirectoryPage; entries: Map<number, DirectoryEntry> }>();
 
   constructor(root: string, criteria: readonly string[]) {
     this.root = root;
@@ -167,12 +186,20 @@ export class TaskAcceptance {
 
   async prepare(tool: string, signal?: AbortSignal): Promise<void> {
     this.signal = signal;
-    if (tool === "exec" && this.checks.some(check => check?.kind === "tests-pass" || check?.kind === "response")) {
+    if (tool === "exec" && this.checks.some(check => check?.kind === "tests-pass")) {
       this.prepared = await workspaceVersion(this.root, signal === undefined ? {} : { signal });
     }
   }
 
   async observe(tool: string, argsJson: string, result: ToolResult): Promise<void> {
+    if (result.directoryPage !== undefined && result.status === "completed" && result.errorKind === undefined && result.effectUncertain !== true) {
+      const page = result.directoryPage;
+      const current = this.inventories.get(page.snapshot) ?? { page, entries: new Map<number, DirectoryEntry>() };
+      current.page = page;
+      page.entries.forEach((entry, index) => current.entries.set(page.offset + index, entry));
+      this.inventories.set(page.snapshot, current);
+      if (this.inventories.size > 8) this.inventories.delete(this.inventories.keys().next().value ?? "");
+    }
     if (tool === "edit" && result.errorKind === undefined) { this.mutated = true; this.tested = null; }
     if (tool !== "exec") return;
     if (result.errorKind !== "invalid-args") { this.mutated = true; this.tested = null; }
@@ -188,25 +215,47 @@ export class TaskAcceptance {
     this.prepared = null;
   }
 
-  get hasFilesystemPredicate(): boolean { return this.checks.some((check) => check?.kind === "directory-exists" || check?.kind === "file-exists"); }
+  get hasFilesystemPredicate(): boolean { return this.checks.some((check) => check?.kind === "directory-exists" || check?.kind === "file-exists" || check?.kind === "directory-listing"); }
+
+  // An explicit composite contract may also require writes or tests. Restrict
+  // tools only for a single inventory obligation, never discard other criteria.
+  get directoryOnly(): boolean { return this.checks.length === 1 && this.checks[0]?.kind === "directory-listing"; }
+
+  get inventoryInstruction(): string | null {
+    const check = this.checks.find(check => check?.kind === "directory-listing");
+    if (check?.kind !== "directory-listing") return null;
+    return `Inventário verificado: use read com kind="directory", path=${JSON.stringify(check.path)}, recursive=${check.recursive}; siga nextCursor até observar todas as páginas. Não repita ls/find para obter uma cauda omitida. O runtime entregará a lista das entradas observadas; resultados parciais não comprovam completude.`;
+  }
 
   get clarificationReason(): string | null { return this.checks.some(check => check?.kind === "clarification-required") ? CLARIFY : null; }
 
-  async check(finalText?: string): Promise<{ complete: boolean; reason: string }> {
+  async check(finalText?: string): Promise<{ complete: boolean; reason: string; finalText?: string }> {
     const observed: string[] = [];
+    const responses: string[] = [];
     let current: WorkspaceSnapshot | null = null;
     for (const [index, check] of this.checks.entries()) {
       if (check === null) return { complete: false, reason: `criterion needs an explicit verifier: ${this.criteria[index]}` };
       if (check.kind === "clarification-required") return { complete: false, reason: CLARIFY };
-      if (check.kind === "directory-exists" || check.kind === "file-exists") {
+      if (check.kind === "directory-listing") {
+        const target = resolveInScope(this.root, check.path);
+        const root = resolveInScope(this.root, ".");
+        if (target === null || root === null) return { complete: false, reason: "directory listing scope escapes workspace" };
+        const scope = path.relative(root, target) || ".";
+        const inventory = [...this.inventories.values()].reverse().find(item => item.page.scope === scope && item.page.recursive === check.recursive);
+        if (inventory === undefined || !inventory.page.scanComplete || inventory.entries.size !== inventory.page.total || Array.from({ length: inventory.page.total }, (_, i) => i).some(i => !inventory.entries.has(i))) return { complete: false, reason: "directory inventory incomplete: use read kind=directory and retrieve every nextCursor; no complete list certified" };
+        const entries = [...inventory.entries.entries()].sort(([a], [b]) => a - b).map(([, entry]) => entry).filter(entry => check.filter === "all" || entry.type === (check.filter === "files" ? "file" : "directory"));
+        responses.push(`Listei ${entries.length} entrada(s) em ${JSON.stringify(scope)} — ${check.recursive ? "escopo recursivo" : "somente filhos imediatos, sem recursão"}${check.filter === "all" ? "" : `; filtro: ${check.filter === "files" ? "arquivos" : "diretórios"}`}. Ocultos incluídos; links simbólicos listados sem seguir seus destinos.\n\n${entries.map(entry => `- ${JSON.stringify(entry.path)} [${entry.type}]`).join("\n") || "A pasta não contém entradas desse tipo."}\n\nTodas as ${inventory.page.total} entradas do escopo foram recuperadas. Esta é uma observação do diretório, não um snapshot atômico de alterações futuras.`);
+        observed.push(`directory inventory delivered: ${inventory.page.total} entries observed in ${scope}`);
+      } else if (check.kind === "directory-exists" || check.kind === "file-exists") {
         const target = resolveInScope(this.root, check.path);
         if (target === null) return { complete: false, reason: `acceptance target escapes the workspace: ${check.path}` };
         try {
           const stat = fs.statSync(target);
           if (!(check.kind === "directory-exists" ? stat.isDirectory() : stat.isFile())) throw new Error("wrong kind");
           observed.push(`${check.kind}:${check.path} observed on filesystem`);
+          responses.push(`${check.kind === "directory-exists" ? "A pasta" : "O arquivo"} ${JSON.stringify(check.path)} existe no projeto. Existência confirmada pelo Lattice.`);
         } catch { return { complete: false, reason: `${check.kind}:${check.path} not observed` }; }
-      } else if (check.kind === "tests-pass" || this.mutated) {
+      } else if (check.kind === "tests-pass") {
         const tests = this.ledger.check();
         if (!tests.complete) return tests;
         if (this.tested === null) return { complete: false, reason: `test evidence unknown or stale: ${this.unknownReason}` };
@@ -219,9 +268,9 @@ export class TaskAcceptance {
         observed.push(tests.reason);
       } else {
         if (finalText === undefined || finalText.trim() === "") return { complete: false, reason: "final analysis response required" };
-        observed.push("analysis response provided; filesystem correctness not certified");
+        observed.push(`analysis response provided; filesystem correctness not certified${this.mutated ? "; exec/edit effects are not certified by response" : ""}`);
       }
     }
-    return { complete: observed.length > 0, reason: observed.join("; ") || "no acceptance criteria" };
+    return { complete: observed.length > 0, reason: observed.join("; ") || "no acceptance criteria", ...(responses.length > 0 ? { finalText: responses.join("\n\n") } : {}) };
   }
 }

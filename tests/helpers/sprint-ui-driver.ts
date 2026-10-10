@@ -41,7 +41,7 @@ export async function driveSprintDemo(session: CdpSession, endpoint: string, sho
   assert.equal(await evaluate(session, `[...document.querySelectorAll('.notice-row')].some(e => e.textContent.includes('Bloqueio de retomada'))`), false);
   assert.doesNotMatch(await evaluate<string>(session, `document.querySelector('.budgettag').textContent`), /\/50|\/200/);
   assert.equal(await evaluate(session, `getComputedStyle(document.querySelector(".topbar .state")).color !== getComputedStyle(document.querySelector(".topbar .state")).backgroundColor`), true);
-  await evaluate(session, `(() => { const e = document.querySelector('.chat'); e.scrollTop = 0; e.dispatchEvent(new Event('scroll')); })()`);
+  await evaluate(session, `(() => { const e = document.querySelector('.chat'); e.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true})); e.scrollTop = 0; e.dispatchEvent(new Event('scroll')); })()`);
   await evaluate(session, `[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Configurações').click()`);
   await waitFor(session, `document.querySelector('.settings') !== null`);
   await evaluate(session, `[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tarefas').click()`);

@@ -51,3 +51,24 @@ describe("substantive progress rather than incidental presentation", () => {
   it("preserves a real output change beyond the rendered 4000-character prefix", async () => { await probes("content"); });
   it("preserves a changed exit status even with identical stdout", async () => { await probes("exit"); });
 });
+
+describe("verified path observations from bounded POSIX queries", () => {
+  async function listingSequence(productive: boolean) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lattice-query-progress-")); const root = path.join(dir, "project"); fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, "a.txt"), "a"); fs.writeFileSync(path.join(root, "b.txt"), "b");
+    const db = openLatticeDb(path.join(dir, "data"));
+    const contract = createContract({ taskId: "t", rootId: "r", objective: "Inspect", scope: [root], acceptanceCriteria: ["response"], obligations: ["preserve work"], grants: [{ subject: "agent", operations: ["model.invoke", "exec"], targets: [root], expiresAt: null, limits: { maxCalls: null, maxTokens: null } }], prohibitions: [], realm: "local-trusted", allowedProvider: "fake", allowedModel: "m", expiresAt: null, retentionPolicy: "discard fixture", origin: "fixture" });
+    const commands = ["ls -1A", "find . -mindepth 1 -maxdepth 1 -print | sort -r", "ls -A1 . | sort", "find . -maxdepth 1 -mindepth 1", "ls -1A .", "find . -mindepth 1 -maxdepth 1 | sort"];
+    const steps = commands.map(command => ({ toolCalls: [{ name: "exec", argumentsJson: JSON.stringify({ mode: "shell", shell: "sh", command, cwd: "." }) }], usage: { inputTokens: 10, outputTokens: 5 } }));
+    const provider = new FakeProvider([...steps, { text: "Observed", usage: { inputTokens: 10, outputTokens: 5 } }]);
+    try {
+      const stop = await runTaskLoop({ db: db.raw, contract, provider, model: "m", sessionId: "s", runId: "run", ownerGeneration: 1, grantedCalls: null, grantedTokens: null, maxIterations: 10, tools: buildToolset(), toolContext: { workspaceRoot: root, realm: "local-trusted" }, taskSurface: { objective: "Inspect", acceptanceCriteria: ["response"], grants: ["exec"], prohibitions: [], obligations: [], unknowns: [], humanDecisions: [], versions: [], lastError: null },
+        beforeRequest: () => { if (productive && provider.requests.length === 2) fs.writeFileSync(path.join(root, "new.txt"), "new information"); }, acceptanceVerifiers: [response => ({ complete: response?.text === "Observed", reason: "response" })] });
+      expect(stop).toMatchObject(productive ? { decision: "STOP", modelCalls: 7 } : { decision: "ASK", modelCalls: 5 });
+      if (!productive) expect(stop.reason).toContain("no progress");
+      const receipts = db.raw.prepare("SELECT detail FROM receipts WHERE json_extract(detail,'$.detail') LIKE '%posix-directory-query%'").all(); expect(receipts).toHaveLength(productive ? 6 : 5);
+    } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+  it.skipIf(process.platform === "win32")("ls/find whitespace, order and relative-prefix differences do not reset stagnation", async () => { await listingSequence(false); });
+  it.skipIf(process.platform === "win32")("genuinely newly observed entries remain progress", async () => { await listingSequence(true); });
+});

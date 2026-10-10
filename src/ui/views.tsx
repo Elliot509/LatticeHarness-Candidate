@@ -542,9 +542,9 @@ function ToolRow({ tool, onOpen, open }: { tool: ToolActivityView; onOpen: () =>
 }
 
 function MessageRow({ message }: { message: MessageView }): JSX.Element {
-  const author = message.author === "user" ? "Você" : message.author === "agent" ? "Agente" : "Runtime";
+  const author = message.source === "verified" ? "Resultado verificado pelo Lattice" : message.author === "user" ? "Você" : message.author === "agent" ? message.source === "model" ? "Agente · resposta do modelo" : "Agente · mensagem registrada" : "Runtime";
   return (
-    <article className={`message-row ${message.author}`}>
+    <article className={`message-row ${message.author}${message.source === "verified" ? " verified" : ""}`}>
       <time className="eventtime" dateTime={message.recordedAt}>{shortTime(message.recordedAt)}</time>
       <div className="message-content">
         <span className="author">{author}</span>
@@ -603,6 +603,7 @@ function SteeringRow({ steering }: { steering: SteeringView }): JSX.Element {
 function TaskNotices({ task }: { task: TaskSnapshot }): JSX.Element | null {
   const description = taskStateDescription(task);
   const blockers = task.state === "COMPLETED" || task.state === "CANCELLED" || task.state === "RUNNING" ? [] : task.resumeBlockers.filter(blocker => blocker !== "terminal-state");
+  if (task.state === "COMPLETED" && task.messages.some(message => message.source === "verified") && task.unknowns === 0 && task.unknownHistory.length === 0 && task.waits.length === 0 && task.tools.every(tool => tool.status === "completed") && task.verifications.every(verification => verification.exitCode === 0)) return null;
   if (description === "" && task.waits.length === 0 && task.unknowns === 0 && task.resumeBlockers.length === 0) return null;
   return (
     <section className={`task-notices task-notices-${task.state.toLowerCase().replace("_", "-")}`} aria-label="Estado da execução">
@@ -647,18 +648,35 @@ function TaskNotices({ task }: { task: TaskSnapshot }): JSX.Element | null {
 
 const chatPositions = new Map<string, { top: number; following: boolean }>();
 
+function ExecutionGroup({ task, items, inspecting, children }: { task: TaskSnapshot; items: ReturnType<typeof taskActivity>; inspecting: boolean; children: React.ReactNode }): JSX.Element {
+  const safe = task.state === "COMPLETED" && task.unknowns === 0 && task.unknownHistory.length === 0 && items.every(item => item.kind === "tool" ? item.value.status === "completed" : item.kind === "verification" && item.value.exitCode === 0);
+  const [open, setOpen] = useState(!safe);
+  const previousSafe = useRef(safe);
+  useEffect(() => {
+    if (!safe) setOpen(true);
+    else if (!previousSafe.current && !inspecting) setOpen(false);
+    previousSafe.current = safe;
+  }, [safe, inspecting]);
+  const count = items.filter(item => item.kind === "tool").length;
+  return <details className="execution-block" open={open} onToggle={event => { setOpen(event.currentTarget.open); }}>
+    <summary>{count > 0 ? `${count} ${count === 1 ? "ferramenta" : "ferramentas"}${task.state === "COMPLETED" ? " executadas" : ""}` : "Verificações"} · {stateLabel(task.state)}{!safe && task.state === "COMPLETED" ? " · há ocorrências para inspecionar" : ""}</summary>
+    {children}
+  </details>;
+}
+
 export function Chat({ state, dispatch }: ChatProps): JSX.Element {
   const chatRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const followingRef = useRef(true);
+  const scrollIntentUntil = useRef(0);
   const task = state.task;
   const activity = task === null ? [] : taskActivity(task);
   const groups: Array<typeof activity> = [];
   for (const item of activity) {
     const last = groups.at(-1);
     const previous = last?.at(-1);
-    if (item.kind === "tool" && item.value.status === "completed" && ["read", "search"].includes(item.value.tool) && previous?.kind === "tool" && previous.value.status === "completed" && previous.value.tool === item.value.tool) last?.push(item);
+    if ((item.kind === "tool" || item.kind === "verification") && (previous?.kind === "tool" || previous?.kind === "verification")) last?.push(item);
     else groups.push([item]);
   }
   const renderActivity = (item: typeof activity[number]): JSX.Element => {
@@ -676,8 +694,8 @@ export function Chat({ state, dispatch }: ChatProps): JSX.Element {
     if (chatRef.current !== null && saved !== undefined) chatRef.current.scrollTop = saved.top;
   }, [task?.taskId]);
   useEffect(() => {
-    if (followingRef.current) bottomRef.current?.scrollIntoView({ block: "nearest" });
-  }, [following, task?.cut]);
+    if (followingRef.current && state.detailId === null) bottomRef.current?.scrollIntoView({ block: "nearest" });
+  }, [following, task?.cut, state.detailId]);
 
   if (task === null) return <div className="chat" aria-live="off" />;
   return (
@@ -686,10 +704,17 @@ export function Chat({ state, dispatch }: ChatProps): JSX.Element {
         ref={chatRef}
         className="chat"
         aria-label="Atividade da tarefa"
+        onWheel={() => { scrollIntentUntil.current = performance.now() + 1500; }}
+        onTouchMove={() => { scrollIntentUntil.current = performance.now() + 1500; }}
+        onKeyDown={event => { if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) scrollIntentUntil.current = performance.now() + 1500; }}
+        onPointerDown={event => { if (event.clientX >= event.currentTarget.getBoundingClientRect().right - 20) scrollIntentUntil.current = performance.now() + 1500; }}
         onScroll={() => {
           const node = chatRef.current;
           if (node === null) return;
           const nextFollowing = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+          // DOM growth/collapse can emit scroll without a user gesture. It
+          // must not turn automatic following into historical inspection.
+          if (followingRef.current && !nextFollowing && state.detailId === null && performance.now() > scrollIntentUntil.current) return;
           followingRef.current = nextFollowing;
           setFollowing(nextFollowing);
           chatPositions.set(task.taskId, { top: node.scrollTop, following: nextFollowing });
@@ -718,12 +743,11 @@ export function Chat({ state, dispatch }: ChatProps): JSX.Element {
             <span>Eventos do runtime aparecem aqui.</span>
           </div>
         )}
-        {groups.map(group => group.length === 1 ? group.map(renderActivity) : (
-          <details className="activity-group" key={group[0]?.value.id}>
-            <summary>{group.length} observações de {group[0]?.kind === "tool" ? group[0].value.tool : "atividade"}</summary>
+        {groups.map(group => group[0]?.kind === "tool" || group[0]?.kind === "verification" ? (
+          <ExecutionGroup key={group[0].value.id} task={task} items={group} inspecting={state.detailId !== null || !following}>
             {group.map(renderActivity)}
-          </details>
-        ))}
+          </ExecutionGroup>
+        ) : group.map(renderActivity))}
         <div ref={bottomRef} />
       </div>
       {!following && (
@@ -747,11 +771,15 @@ export function Detail({ api, state, dispatch }: DetailProps): JSX.Element | nul
   const task = state.task;
   const [full, setFull] = useState<string | null>(null);
   const [fullTruncated, setFullTruncated] = useState(false);
+  const [argumentsText, setArgumentsText] = useState<string | null>(null);
+  const [argumentsTruncated, setArgumentsTruncated] = useState(false);
   const [detailState, setDetailState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [loadedDetailId, setLoadedDetailId] = useState<string | null>(null);
   useEffect(() => {
     setFull(null);
     setFullTruncated(false);
+    setArgumentsText(null);
+    setArgumentsTruncated(false);
     setDetailState("loading");
     setLoadedDetailId(null);
     if (task === null || state.detailId === null) return;
@@ -762,6 +790,8 @@ export function Detail({ api, state, dispatch }: DetailProps): JSX.Element | nul
         if (!cancelled) {
           setFull(result.detail);
           setFullTruncated(result.truncated);
+          setArgumentsText(result.argsJson ?? null);
+          setArgumentsTruncated(result.argsTruncated ?? false);
           setDetailState("ready");
           setLoadedDetailId(state.detailId);
         }
@@ -823,6 +853,10 @@ export function Detail({ api, state, dispatch }: DetailProps): JSX.Element | nul
             {tool.version !== null && <><dt>Versão</dt><dd>{tool.version}</dd></>}
           </dl>
         </section>
+        {selectedDetailState === "ready" && argumentsText !== null && <section className="inspector-section arguments-section">
+          <h3>Argumentos</h3><pre className="output">{argumentsText}</pre>
+          {argumentsTruncated && <p className="meta">Argumentos truncados no limite de apresentação.</p>}
+        </section>}
         {tool.tool === "edit" && selectedDetailState === "ready" && full !== null && <DiffView full={full} />}
         <section className="inspector-section output-section">
           <h3>Evidência</h3>
@@ -852,11 +886,34 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
   const [composing, setComposing] = useState(false);
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState("");
+  const busy = useRef(false);
+  const followUp = useRef<{ from: string; text: string; commandId: string } | null>(null);
 
   async function send(): Promise<void> {
     const text = state.draft.trim();
-    if (task === null || task.state === "COMPLETED" || task.state === "CANCELLED" || text === "" || sending || composing) return;
+    if (task === null || task.state === "CANCELLED" || text === "" || busy.current || composing) return;
+    busy.current = true;
     setSending(true);
+    if (task.state === "COMPLETED") {
+      const request = followUp.current?.from === task.taskId && followUp.current.text === text ? followUp.current : { from: task.taskId, text, commandId: createCommandId() };
+      followUp.current = request;
+      try {
+        const result = await api.command({ commandId: request.commandId, kind: "follow-up-task", taskId: task.taskId, payload: { objective: text } });
+        if (!result.accepted) throw new Error("A nova solicitação foi recusada. Seu rascunho foi preservado.");
+        if (result.state === "READY") {
+          setNotice("A nova tarefa foi criada, mas o início não foi confirmado. Reenvie para confirmar a mesma solicitação; o rascunho foi preservado.");
+          dispatch({ type: "sessions", sessions: await api.sessions() });
+          return;
+        }
+        dispatch({ type: "task-draft", taskId: task.taskId, draft: "" });
+        dispatch({ type: "open-task", taskId: result.taskId });
+        followUp.current = null;
+        setNotice("");
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Envio não confirmado. Reenvie para confirmar a mesma solicitação; seu rascunho foi preservado.");
+      } finally { busy.current = false; setSending(false); }
+      return;
+    }
     const commandId = createCommandId();
     dispatch({ type: "command-sent", command: { commandId, kind: "steer", text, sentAt: Date.now() } });
     dispatch({ type: "draft", draft: "" });
@@ -876,6 +933,7 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
       dispatch({ type: "task-draft", taskId: task.taskId, draft: text });
       dispatch({ type: "command-failed", taskId: task.taskId, commandId, error: "Não foi possível confirmar o envio. Confira o histórico antes de reenviar; seu rascunho foi preservado." });
     } finally {
+      busy.current = false;
       setSending(false);
     }
   }
@@ -915,7 +973,7 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
 
   if (task === null) return <div className="composer" />;
   const destination =
-    task.state === "RUNNING"
+    task.state === "COMPLETED" ? "Nova tarefa no mesmo projeto · contexto anterior não enviado" : task.state === "RUNNING"
       ? "orientação para o turno atual"
       : task.state === "NEEDS_INPUT"
         ? "resposta para a pergunta pendente"
@@ -931,7 +989,8 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
           value={state.draft}
           aria-label="Mensagem para a tarefa"
           rows={2}
-          placeholder="Orientar a tarefa"
+          placeholder={task.state === "COMPLETED" ? "Nova solicitação" : "Orientar tarefa"}
+          disabled={sending}
           onChange={(event) => { dispatch({ type: "draft", draft: event.target.value }); }}
           onCompositionStart={() => { setComposing(true); }}
           onCompositionEnd={() => { setComposing(false); }}
@@ -954,8 +1013,8 @@ export function Composer({ api, state, dispatch }: ComposerProps): JSX.Element {
               Retomar
             </button>
           )}
-          <button type="button" className="btn primary" disabled={sending || state.draft.trim() === "" || task.state === "COMPLETED" || task.state === "CANCELLED"} onClick={() => { void send(); }}>
-            {sending ? "Enviando" : "Enviar"}
+          <button type="button" className="btn primary" disabled={sending || state.draft.trim() === "" || task.state === "CANCELLED"} onClick={() => { void send(); }}>
+            {sending ? "Enviando" : task.state === "COMPLETED" ? "Enviar nova tarefa" : "Enviar"}
           </button>
         </div>
         {notice !== "" && <p className="meta" role="status">{notice}</p>}

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { listingProgress } from "./listing-progress.js";
 import { buildChildEnv, toolEnvOverlay } from "../platform/childEnv.js";
 import type { ToolDefinition } from "../providers/types.js";
 import { resolveInScope } from "../platform/paths.js";
@@ -266,6 +267,8 @@ export class ExecTool implements Tool<ExecArgs> {
     const code = child.exitCode;
     const out = renderOutput(stdoutChunks, stderrChunks, truncated.stdout, truncated.stderr);
     const observationKey = createHash("sha256").update(JSON.stringify([code, child.signalCode, out, truncated.stdout, truncated.stderr])).digest("hex");
+    const progress = code === 0 && !truncated.stdout && !truncated.stderr && context.envOverlay === undefined
+      ? listingProgress(rawArgs, cwd, Buffer.concat(stdoutChunks).toString("utf8"), Buffer.concat(stderrChunks).toString("utf8"), baseEnv(context, undefined)) : undefined;
     if (code === null) {
       return {
         status: "completed",
@@ -281,6 +284,7 @@ export class ExecTool implements Tool<ExecArgs> {
       status: "completed",
       summary: `exit ${code} in ${durationMs}ms (cwd ${cwd})`,
       observationKey,
+      ...(progress === undefined ? {} : { progress }),
       detail: out,
       truncated: truncated.stdout || truncated.stderr,
       ...(code !== 0 ? { errorKind: "non-zero-exit", errorRetryable: false } : {}),

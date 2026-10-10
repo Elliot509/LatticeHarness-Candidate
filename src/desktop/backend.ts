@@ -9,6 +9,7 @@ import type { LatticeServer } from "../server/server.js";
 import type { LatticeDb } from "../storage/db.js";
 
 import { DESKTOP_BACKEND_PROTOCOL } from "./protocol.js";
+import net from "node:net";
 export { DESKTOP_BACKEND_PROTOCOL } from "./protocol.js";
 
 export interface DesktopBackendConfig {
@@ -66,7 +67,15 @@ export interface DesktopBackend {
   close(): Promise<void>;
 }
 
+// Electron's embedded Node transport can fail all auto-family attempts
+// before HTTPS dispatch. Use the system-selected address in the desktop
+// backend, without retrying an uncertain request or weakening TLS.
+export function configureDesktopNetwork(isElectron = Object.hasOwn(process.versions, "electron")): void {
+  if (isElectron) net.setDefaultAutoSelectFamily(false);
+}
+
 export async function startDesktopBackend(config: DesktopBackendConfig): Promise<DesktopBackend> {
+  configureDesktopNetwork();
   if (typeof config.workspace !== "string" || (config.workspace.trim() === "" && config.nativeProjectSelection !== true)) {
     throw new Error("backend start needs a workspace");
   }

@@ -3,10 +3,15 @@ import fs from "node:fs";
 import type { ToolDefinition } from "../providers/types.js";
 import { resolveInScope } from "../platform/paths.js";
 import { HandleRegistry } from "./handles.js";
+import { DirectoryReader } from "./directory.js";
 import { toolFailure, type Tool, type ToolContext, type ToolResult } from "./types.js";
 
 export interface ReadArgs {
   path: string;
+  kind?: "directory";
+  recursive?: boolean;
+  cursor?: string;
+  pageSize?: number;
   start?: number;
   count?: number;
   handleId?: string;
@@ -17,11 +22,15 @@ export interface ReadArgs {
 export const READ_DEFINITION: ToolDefinition = {
   name: "read",
   description:
-    "Read a workspace file by 1-based line range, or expand a previous truncated result via its handle. Returns a content version with every snapshot.",
+    "Read a workspace file by line/byte range, expand a result handle, or list directory metadata with kind:'directory', path:'.'. Directory pages include hidden entries, scope, completeness and nextCursor; continue the same cursor instead of repeating ls/find. recursive defaults false (immediate children). No file contents are read for directory listing.",
   parameters: {
     type: "object",
     properties: {
       path: { type: "string" },
+      kind: { type: "string", enum: ["directory"] },
+      recursive: { type: "boolean" },
+      cursor: { type: "string" },
+      pageSize: { type: "number", description: "Directory entries per page, 1..200; text size also bounded" },
       start: { type: "number", description: "First line, 1-based, inclusive" },
       count: { type: "number", description: "Number of lines" },
       handleId: { type: "string", description: "Expand a previous truncated result" },
@@ -70,11 +79,13 @@ export function contentVersion(content: Buffer): string {
 export class ReadTool implements Tool<ReadArgs> {
   readonly definition = READ_DEFINITION;
   private readonly handles: HandleRegistry;
+  private readonly directory = new DirectoryReader();
   constructor(handles: HandleRegistry = new HandleRegistry()) {
     this.handles = handles;
   }
 
   execute(rawArgs: ReadArgs, context: ToolContext): Promise<ToolResult> {
+    if (rawArgs.kind === "directory") return this.directory.execute(rawArgs, context);
     return Promise.resolve(this.executeSync(rawArgs, context));
   }
 
@@ -87,7 +98,20 @@ export class ReadTool implements Tool<ReadArgs> {
       if (handle === undefined) {
         return toolFailure("invalid-args", `unknown handle ${rawArgs.handleId}`, false);
       }
-      try { return {
+      try {
+        if (handle.kind === "output" || rawArgs.offset !== undefined) {
+          const bytes = Buffer.from(handle.expand());
+          const offset = rawArgs.offset ?? 0;
+          const maxBytes = rawArgs.maxBytes ?? 3000;
+          if (!Number.isSafeInteger(offset) || offset < 0 || offset > bytes.length || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 3000) return toolFailure("invalid-args", "output offset must be within captured output; maxBytes must be 1..3000", false);
+          const end = Math.min(bytes.length, offset + maxBytes);
+          const selected = bytes.subarray(offset, end);
+          let detail: string;
+          try { detail = new TextDecoder("utf-8", { fatal: true }).decode(selected); }
+          catch { detail = `[base64 byte range] ${selected.toString("base64")}`; }
+          return { status: "completed", summary: `captured output ${handle.id}: bytes ${offset}-${end}/${bytes.length}; ${end < bytes.length ? `next read handleId=${handle.id} offset=${end} maxBytes=3000` : "end of captured output (not proof of filesystem coverage)"}`, detail, handleId: handle.id, complete: end === bytes.length, truncated: end < bytes.length, observationKey: contentVersion(selected) };
+        }
+        return {
         status: "completed",
         summary: `expanded ${handle.kind} result ${handle.id}`,
         detail: handle.expand(),

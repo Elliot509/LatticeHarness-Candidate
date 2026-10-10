@@ -89,7 +89,7 @@ export interface LoopOptions {
   // The hook observes readiness only; check() still commits/consumes wakes.
   awaitWake?: (wait: NonNullable<LoopStop["wait"]>) => Promise<void>;
   onEvent?: (event: LoopEvent) => void;
-  onModelText?: (text: string) => void;
+  onModelText?: (text: string, source?: "model" | "verified") => void;
 }
 
 // Caller-provided wait policy. check() runs at the top of every iteration,
@@ -130,6 +130,7 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
   const contextChars = options.contextChars ?? 24_000;
   const evidence: EvidenceItem[] = [];
   const observations: string[] = [];
+  const coverage = new Map<string, { version: string; items: Set<string> }>();
   let stagnant = 0;
   let iterations = 0;
   let modelCalls = 0;
@@ -340,8 +341,9 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
     }
     const finishedAt = new Date();
     options.onEvent?.({ kind: "model-response", requestId, attemptId: modelAttempt.attemptId, toolCalls: response.toolCalls.length });
-    if (response.text.trim() !== "") {
-      options.onModelText?.(response.text.slice(0, 2000));
+    const inventoryFinal = response.toolCalls.length === 0 && options.taskSurface.acceptanceCriteria.some(criterion => criterion.startsWith("directory-listing:"));
+    if (response.text.trim() !== "" && !inventoryFinal) {
+      options.onModelText?.(response.toolCalls.length === 0 ? response.text : response.text.slice(0, 2000), "model");
     }
     settleModelUsage(options, modelAttempt.attemptId, modelAttempt.intentId, requestId, response, admittedAt, dispatchedAt, finishedAt);
     const budget = snapshotBudget(options);
@@ -352,8 +354,11 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
     if (response.toolCalls.length === 0) {
       const verification = await checkCompletion(options, response);
       if (verification.complete) {
+        if (inventoryFinal && response.text.trim() !== "") options.onModelText?.(response.text, "model");
+        if (verification.finalText !== undefined && (inventoryFinal || response.text.trim() === "")) options.onModelText?.(verification.finalText, "verified");
         return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
       }
+      if (inventoryFinal) options.onModelText?.(`Resultado não verificado: ${verification.reason}. Preciso de orientação para obter as entradas restantes.`);
       return stop(
         "ASK",
         `acceptance criteria unverified: ${verification.reason}; ${response.text.slice(0, 300)}`,
@@ -374,7 +379,7 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
           id: `ev-${evidence.length + 1}`,
           text: `Unknown tool requested: ${call.name}. Available: ${options.tools.map((tool) => tool.name).join(", ")}.`,
         });
-        if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), "unknown tool")) return noProgress();
+        if (noteObservation(`unavailable:${call.name}`, "unknown tool")) return noProgress();
         continue;
       }
       // Optional execution-activity cap (R1 D-R1-02): counts dispatches, not
@@ -455,20 +460,32 @@ export async function runTaskLoop(options: LoopOptions): Promise<LoopStop> {
       evidence.push({ id: `ev-${evidence.length + 1}`, text: summary.text });
       if (summary.outcome === "unknown") return stop("ESCALATE", "tool effect UNKNOWN; reconcile before further work", iterations, modelCalls, toolDispatches, options);
       if (call.name === "edit" && summary.outcome === "confirmed") editRevision += 1;
-      const observation = JSON.parse(summary.detailJson) as { version?: unknown; observationKey?: unknown };
-      if (noteObservation(actionFingerprint(call.name, stableArgs(call.argumentsJson)), JSON.stringify([observation.observationKey ?? summary.text, observation.version ?? null]))) {
+      const observation = JSON.parse(summary.detailJson) as { version?: unknown; observationKey?: unknown; progress?: { scope: string; version: string; items: string[] }; errorKind?: string };
+      let repeated: boolean;
+      if (observation.progress !== undefined) {
+        const progress = observation.progress;
+        const prior = coverage.get(progress.scope);
+        const current = prior?.version === progress.version ? prior : { version: progress.version, items: new Set<string>() };
+        const newItems = progress.items.some(item => !current.items.has(item));
+        if (prior?.version !== progress.version || newItems) stagnant = 0;
+        else stagnant += 1;
+        progress.items.forEach(item => current.items.add(item));
+        coverage.set(progress.scope, current);
+        repeated = stagnant >= 4;
+      } else repeated = noteObservation(observation.errorKind !== undefined ? `failed:${call.name}:${observation.errorKind}` : actionFingerprint(call.name, stableArgs(call.argumentsJson)), JSON.stringify([observation.observationKey ?? summary.text, observation.version ?? null]));
+      if (repeated) {
         // A verified outcome wins over a repeat counter, but UNKNOWN above
         // still exits before this check and unresolved effects still gate it.
         if (options.verifyAfterTools === true) {
           const verification = await checkCompletion(options);
-          if (verification.complete) return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
+          if (verification.complete) { if (verification.finalText !== undefined) options.onModelText?.(verification.finalText, "verified"); return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options); }
         }
         return noProgress();
       }
     }
     if (options.verifyAfterTools === true) {
       const verification = await checkCompletion(options);
-      if (verification.complete) return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options);
+      if (verification.complete) { if (verification.finalText !== undefined) options.onModelText?.(verification.finalText, "verified"); return stop("STOP", verification.reason, iterations, modelCalls, toolDispatches, options); }
       options.taskSurface.lastError = verification.reason;
     }
   }
@@ -538,7 +555,8 @@ async function invokeTool(
 ): Promise<{ outcome: "confirmed" | "failed" | "unknown"; text: string; detailJson: string; handleId?: string | undefined }> {
   try {
     const { result } = await registered.run(argsJson, context);
-    const text = `[${registered.name}] ${result.status}: ${result.summary}${result.detail !== undefined ? `\n${result.detail.slice(0, 4000)}` : ""}`;
+    const previewTruncated = (result.detail?.length ?? 0) > 4000;
+    const text = `[${registered.name}] ${result.status}: ${result.summary}${result.detail !== undefined ? `\n${result.detail.slice(0, 4000)}` : ""}${previewTruncated ? `\n[model preview truncated; recover captured output with read path="." handleId=${result.handleId ?? "unavailable"} offset=0 maxBytes=3000; executor truncation=${result.truncated === true}]` : ""}${result.truncationNote !== undefined ? `\n${result.truncationNote}` : ""}`;
     // Receipts carry before/after versions at the top level so resume-time
     // reconciliation and drift detection never depend on tool-specific
     // nesting inside the raw output blob.
@@ -549,6 +567,11 @@ async function invokeTool(
       version: result.version ?? null,
       afterVersion: result.version ?? null,
       observationKey: result.observationKey ?? null,
+      progress: result.progress,
+      directoryPage: result.directoryPage,
+      handleId: result.handleId,
+      previewTruncated,
+      errorKind: result.errorKind,
     });
     if (result.status === "unknown" || result.effectUncertain === true) {
       return { outcome: "unknown", text, detailJson, handleId: result.handleId };
@@ -769,6 +792,7 @@ function isUncertainProviderError(error: unknown): boolean {
 export interface AcceptanceCheck {
   complete: boolean;
   reason: string;
+  finalText?: string;
 }
 
 async function checkCompletion(options: LoopOptions, response?: ModelResponse): Promise<AcceptanceCheck> {
@@ -782,7 +806,7 @@ async function checkAcceptanceEvident(verifiers: NonNullable<LoopOptions["accept
   // text; without a satisfied verifier the loop stalls to ASK.
   const checks = await Promise.all(verifiers.map(async (verifier) => verifier(response)));
   return checks.length === 0 ? { complete: false, reason: "no acceptance evidence recorded" } :
-    checks.find((check) => !check.complete) ?? { complete: true, reason: checks.map((check) => check.reason).join("; ") };
+    checks.find((check) => !check.complete) ?? { complete: true, reason: checks.map((check) => check.reason).join("; "), ...(checks.some(check => check.finalText !== undefined) ? { finalText: checks.flatMap(check => check.finalText === undefined ? [] : [check.finalText]).join("\n\n") } : {}) };
 }
 
 export function snapshotBudget(options: LoopOptions): ReturnType<typeof taskBudgetSnapshot> {

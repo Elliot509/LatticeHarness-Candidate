@@ -3,6 +3,10 @@ import { defaultAcceptance, resolveAcceptance } from "../../src/runtime/acceptan
 
 describe("bounded filesystem acceptance, independently of explicit criteria", () => {
   it.each([
+    ['crie uma pasta chamada "aulas_ingles" dentro deste ambiente.', "directory-exists:aulas_ingles"],
+    ["Crie uma pasta chamada aulas_ingles", "directory-exists:aulas_ingles"],
+    ['Crie uma pasta chamada "aulas-ingles" neste ambiente.', "directory-exists:aulas-ingles"],
+    ['Crie uma pasta chamada "Aulas de inglês" dentro desse ambiente.', "directory-exists:Aulas de inglês"],
     ['Crie uma pasta chamada "Python" dentro desse lugar.', "directory-exists:Python"],
     ["Crie uma pasta chamada Python.", "directory-exists:Python"],
     ['Crie uma pasta chamada "Python" dentro desta pasta.', "directory-exists:Python"],
@@ -23,7 +27,7 @@ describe("bounded filesystem acceptance, independently of explicit criteria", ()
     ["Create folder ./Python", "directory-exists:./Python"],
   ])("maps only the complete objective: %s", (objective, criterion) => {
     expect(defaultAcceptance(objective)).toEqual([criterion]);
-    expect(resolveAcceptance(objective)).toMatchObject({ criteria: [criterion], source: "default", policyVersion: "acceptance-2" });
+    expect(resolveAcceptance(objective)).toMatchObject({ criteria: [criterion], source: "default", policyVersion: "acceptance-3" });
   });
 
   it.each([
@@ -36,6 +40,12 @@ describe("bounded filesystem acceptance, independently of explicit criteria", ()
     "Create directory Python; delete the project",
     "Crie uma pasta chamada Python\ne remova Java",
     "Crie uma pasta chamada Python no projeto Outro.",
+    'Crie uma pasta chamada "aulas_ingles" dentro do ambiente Outro.',
+    'Crie uma pasta chamada "aulas_ingles" dentro deste ambiente externo.',
+    'Crie uma pasta chamada "../aulas_ingles" dentro deste ambiente.',
+    'Crie uma pasta chamada "/tmp/aulas_ingles" dentro deste ambiente.',
+    'Crie uma pasta chamada "aulas_ingles" dentro deste ambiente e remova outra.',
+    'Crie uma pasta dentro deste ambiente.',
     "Crie uma pasta chamada Python dentro da pasta Downloads.",
     'Crie uma pasta chamada "Python" dentro dessa pasta chamada Outro.',
     "Create directory ../escape", "Create directory /outside", "Create directory C:\\outside",

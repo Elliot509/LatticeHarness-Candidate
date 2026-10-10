@@ -6,7 +6,7 @@ import { HandleRegistry } from "./handles.js";
 import { PROCESS_DEFINITION, ProcessSupervisor, type ProcessOperation } from "./process.js";
 import { READ_DEFINITION, ReadTool, type ReadArgs } from "./read.js";
 import { SEARCH_DEFINITION, SearchTool, type SearchArgs } from "./search.js";
-import { parseToolArgs, type ToolContext, type ToolResult } from "./types.js";
+import { parseToolArgs, toolFailure, type ToolContext, type ToolResult } from "./types.js";
 
 export interface VerifyTrigger {
   executable: string;
@@ -15,6 +15,7 @@ export interface VerifyTrigger {
 }
 
 export interface ToolsetOptions {
+  directoryOnly?: boolean;
   handles?: HandleRegistry;
   supervisor?: ProcessSupervisor;
   verifyTriggers?: VerifyTrigger[];
@@ -42,7 +43,7 @@ export function buildToolset(options: ToolsetOptions = {}): RegisteredToolEntry[
   const read = new ReadTool(handles);
   const edit = new EditTool();
   const exec = new ExecTool();
-  return [
+  const tools: RegisteredToolEntry[] = [
     {
       name: "search",
       definition: SEARCH_DEFINITION,
@@ -117,4 +118,33 @@ export function buildToolset(options: ToolsetOptions = {}): RegisteredToolEntry[
       },
     },
   ];
+  if (options.directoryOnly === true) {
+    const tool = tools.find(tool => tool.name === "read");
+    if (tool === undefined) throw new Error("directory reader missing");
+    const run = tool.run.bind(tool);
+    tool.definition = { ...READ_DEFINITION, parameters: { type: "object", properties: {
+      path: { type: "string" }, kind: { type: "string", enum: ["directory"] }, recursive: { type: "boolean" }, cursor: { type: "string" }, pageSize: { type: "number" },
+    }, required: ["path", "kind"], additionalProperties: false } };
+    tool.run = async (argsJson, context) => {
+      const parsed = parseToolArgs(argsJson);
+      if (!parsed.ok || parsed.value["kind"] !== "directory" || Object.keys(parsed.value).some(key => !["path", "kind", "recursive", "cursor", "pageSize"].includes(key))) return { result: toolFailure("invalid-args", "This inventory task requires read kind=directory, path and optionally recursive/cursor/pageSize", false), argsSummary: argsJson };
+      return run(argsJson, context);
+    };
+    return [tool];
+  }
+  // Preserve bounded command output for expansion rather than asking the
+  // model to rerun an effectful command to recover an omitted preview.
+  for (const tool of tools) {
+    const run = tool.run.bind(tool);
+    tool.run = async (argsJson, context) => {
+      const out = await run(argsJson, context);
+      if ((out.result.detail?.length ?? 0) > 4000 && out.result.handleId === undefined) {
+        const captured = out.result.detail ?? "";
+        out.result.handleId = handles.store("output", `${tool.name} captured output`, () => captured);
+        out.result.truncationNote = `Model preview is bounded; recover captured output with read path="." handleId=${out.result.handleId} offset=0 maxBytes=3000. Executor truncation=${out.result.truncated === true}; omitted executor bytes cannot be recovered.`;
+      }
+      return out;
+    };
+  }
+  return tools;
 }

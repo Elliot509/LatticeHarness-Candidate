@@ -63,7 +63,7 @@ describe("filesystem acceptance through the real task manager", () => {
       expect(done.tools).toHaveLength(2);
       expect(done.verifications.every(v => v.countsKnown === false)).toBe(true);
       expect(provider.requests[1]?.messages[0]?.content).toContain("not observed");
-      expect(JSON.parse(String(f.db.raw.prepare("SELECT payload FROM events WHERE kind='acceptance-policy'").get()?.["payload"]))).toMatchObject({ source: "default", policyVersion: "acceptance-2" });
+      expect(JSON.parse(String(f.db.raw.prepare("SELECT payload FROM events WHERE kind='acceptance-policy'").get()?.["payload"]))).toMatchObject({ source: "default", policyVersion: "acceptance-3" });
       expect(f.db.raw.prepare("SELECT COUNT(*) AS n FROM intents WHERE state IN ('ADMITTED','CLAIMED','UNKNOWN')").get()).toMatchObject({ n: 0 });
     } finally { await f.tasks.close(); f.db.close(); }
   });
@@ -145,6 +145,7 @@ describe("filesystem acceptance through the real task manager", () => {
       f.tasks.startTask(taskId, "start", new FakeProvider([{ toolCalls: [{ name: "edit", argumentsJson: '{"kind":"create","path":"result.txt","content":"applied"}' }], usage }]));
       await until(() => f.tasks.snapshot(taskId).state !== "RUNNING");
       expect(f.tasks.snapshot(taskId)).toMatchObject({ state: "BLOCKED", unknowns: 1 });
+      expect(f.tasks.snapshot(taskId).messages.some(message => message.source === "verified")).toBe(false);
       expect(fs.existsSync(path.join(f.root, "result.txt"))).toBe(true);
       expect(f.db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE kind='acceptance'").get()).toMatchObject({ n: 0 });
     } finally { clearFaults(); await f.tasks.close(); f.db.close(); }
@@ -164,6 +165,7 @@ describe("filesystem acceptance through the real task manager", () => {
       expect(f.tasks.stop(taskId, "human-stop").accepted).toBe(true);
       await until(() => f.tasks.snapshot(taskId).state !== "RUNNING");
       expect(f.tasks.snapshot(taskId)).toMatchObject({ state: "CANCELLED", budget: { settledCalls: 4, uncertainUsageAttempts: 1 } });
+      expect(f.tasks.snapshot(taskId).messages.some(message => message.source === "verified")).toBe(false);
       expect(f.tasks.snapshot(taskId).stateReason).toContain("stop requested");
       expect(f.tasks.snapshot(taskId).tools).toHaveLength(3);
     } finally { await f.tasks.close(); f.db.close(); }

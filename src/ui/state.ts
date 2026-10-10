@@ -131,7 +131,12 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         event.kind === "state" && (event.state === "CANCELLED" || event.state === "COMPLETED" || event.state === "BLOCKED")
           ? state.pending.filter((command) => command.kind !== "stop")
           : state.pending;
-      return { ...state, task, lastSeq: event.seq, pending };
+      // State frames do not contain the resume gate. Refresh it after a
+      // run settles instead of retaining a RUNNING snapshot's active-runtime.
+      const refreshGate = event.kind === "state" && event.state !== "RUNNING";
+      return { ...state, task, lastSeq: event.seq, pending,
+        needsResync: state.needsResync || refreshGate,
+        resyncTarget: refreshGate ? Math.max(state.resyncTarget ?? 0, event.seq) : (state.resyncTarget ?? 0) };
     }
     case "connection":
       return {

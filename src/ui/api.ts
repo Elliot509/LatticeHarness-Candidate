@@ -55,7 +55,7 @@ export interface ApiClient {
   info(): Promise<{ workspace: string }>;
   sessions(): Promise<SessionSummary[]>;
   snapshot(taskId: string): Promise<TaskSnapshot>;
-  toolDetail(taskId: string, attemptId: string): Promise<{ detail: string; truncated: boolean }>;
+  toolDetail(taskId: string, attemptId: string): Promise<{ detail: string; truncated: boolean; argsJson?: string | null; argsTruncated?: boolean }>;
   command(command: UiCommand): Promise<CommandResult>;
   subscribe(taskId: string, onEvent: (event: UiEvent) => void, onStatus: (status: "live" | "dropped") => void): () => void;
   providers(): Promise<ProviderPresetView[]>;
@@ -108,7 +108,7 @@ export function createApi(base: string): ApiClient {
     return (await response.json()) as TaskSnapshot;
   }
 
-  async function toolDetail(taskId: string, attemptId: string): Promise<{ detail: string; truncated: boolean }> {
+  async function toolDetail(taskId: string, attemptId: string): Promise<{ detail: string; truncated: boolean; argsJson?: string | null; argsTruncated?: boolean }> {
     const response = await fetch(
       `${base}/api/tasks/${encodeURIComponent(taskId)}/tool?id=${encodeURIComponent(attemptId)}`,
     );

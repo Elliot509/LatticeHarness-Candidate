@@ -294,17 +294,19 @@ export class TaskManager {
     this.subscribers.get(taskId)?.delete(subscriber);
   }
 
-  toolDetail(taskId: string, attemptId: string): { attemptId: string; detail: string; truncated: boolean } {
+  toolDetail(taskId: string, attemptId: string): { attemptId: string; detail: string; truncated: boolean; argsJson: string | null; argsTruncated: boolean } {
     this.contractOf(taskId);
     const row = this.db
-      .prepare("SELECT r.detail FROM receipts r JOIN attempts a ON a.attempt_id = r.attempt_id JOIN intents i ON i.intent_id = a.intent_id WHERE r.attempt_id = ? AND i.task_id = ?")
-      .get(attemptId, taskId) as { detail: string } | undefined;
+      .prepare("SELECT r.detail, a.ticket FROM receipts r JOIN attempts a ON a.attempt_id = r.attempt_id JOIN intents i ON i.intent_id = a.intent_id WHERE r.attempt_id = ? AND i.task_id = ?")
+      .get(attemptId, taskId) as { detail: string; ticket: string } | undefined;
     if (row === undefined) throw new Error(`unknown tool result ${attemptId}`);
     const detail = JSON.parse(row.detail) as { summary?: unknown; detail?: unknown };
     const inner = typeof detail.detail === "string" ? (JSON.parse(detail.detail) as { output?: unknown; outputTruncated?: unknown }) : {};
     const text = typeof inner.output === "string" ? inner.output : JSON.stringify(detail);
     const truncated = inner.outputTruncated === true || text.length > 64 * 1024;
-    return { attemptId, detail: truncated ? text.slice(0, 64 * 1024) : text, truncated };
+    const ticket = JSON.parse(row.ticket) as { args?: unknown };
+    const args = typeof ticket.args === "string" ? ticket.args : null;
+    return { attemptId, detail: truncated ? text.slice(0, 64 * 1024) : text, truncated, argsJson: args?.slice(0, 64 * 1024) ?? null, argsTruncated: (args?.length ?? 0) > 64 * 1024 };
   }
 
   missedEvents(taskId: string, afterSeq: number): { events: UiEvent[]; resync: boolean } {
@@ -526,7 +528,7 @@ export class TaskManager {
       lastError: null,
     };
     const modelRef = { provider: adapter, model: manifest.model, providerId: manifest.provider, endpoint: normalizeEndpoint(manifest.baseUrl ?? findPreset(manifest.provider)?.defaultBaseUrl ?? "") };
-    const tools = buildToolset({ supervisor });
+    const tools = buildToolset({ supervisor, directoryOnly: acceptance.directoryOnly });
     // Composition epoch: opened/advanced exactly once per activation under
     // the CURRENT route. Same route re-entry (refresh, reconnect, restart of
     // a READY task) reuses the stored epoch — no inflation. A pendingModel
@@ -591,6 +593,7 @@ export class TaskManager {
         return outcome;
       };
     }
+    let verifiedResult: string | undefined;
     const loopOptions: LoopOptions = {
       db: this.db,
       provider: adapter,
@@ -612,6 +615,7 @@ export class TaskManager {
         surface.acceptanceCriteria = [...contract.acceptanceCriteria];
         surface.prohibitions = [...contract.prohibitions];
         surface.obligations = [...contract.obligations];
+        if (acceptance.inventoryInstruction !== null) surface.obligations = [...surface.obligations, acceptance.inventoryInstruction];
         surface.humanDecisions = this.storedSteerings(taskId).map((record) => record.text);
         surface.unknowns = unknownHistory(this.db, taskId).map((entry) => `${entry.attemptId}: ${entry.reason}`);
       },
@@ -648,8 +652,9 @@ export class TaskManager {
         if (event.kind === "tool-end") waiter.noteToolEnd(event.tool, event.status, event.handle);
         this.onLoopEvent(taskId, live, event);
       },
-      onModelText: (text) => {
-        this.recordEvent(taskId, "chat", { author: "agent", text });
+      onModelText: (text, source = "model") => {
+        if (source === "verified") verifiedResult = text;
+        else this.recordEvent(taskId, "chat", { author: "agent", text, source });
       },
     };
     this.setState(taskId, "RUNNING", "loop started");
@@ -658,6 +663,9 @@ export class TaskManager {
       for (const observation of cleanup) this.recordEvent(taskId, "process-cleanup", observation);
       const uncertain = cleanup.some(({ result }) => result.complete !== true || result.effectUncertain === true);
       this.onLoopStop(taskId, live, stop.decision, stop.reason, stop.wait, uncertain);
+      // Cleanup and human Stop retain authority over the terminal state.
+      // A factual success is published only once COMPLETED is committed.
+      if (this.readState(taskId).state === "COMPLETED" && verifiedResult !== undefined) this.recordEvent(taskId, "chat", { author: "agent", text: verifiedResult, source: "verified" });
       return stop;
     };
     live.done = runTaskLoop(loopOptions).then(
@@ -1009,7 +1017,7 @@ export class TaskManager {
   }
 
   handleCommand(command: UiCommand): CommandResult {
-    const seen = this.processedCommands.get(command.commandId);
+    const seen = command.kind === "follow-up-task" ? undefined : this.processedCommands.get(command.commandId);
     if (seen !== undefined) return seen;
     if (this.processedCommands.size > 1000) {
       const oldest = this.processedCommands.keys().next();
@@ -1047,6 +1055,33 @@ export class TaskManager {
   private dispatch(command: UiCommand): CommandResult {
     const payload = command.payload ?? {};
     switch (command.kind) {
+      case "follow-up-task": {
+        const text = payload["objective"];
+        const from = command.taskId;
+        if (from === undefined || typeof text !== "string" || text.trim() === "" || this.draining || this.safeState(from) !== "COMPLETED") throw new Error("follow-up requires a completed task and a new objective");
+        const prior = this.db.prepare("SELECT payload FROM events WHERE kind='follow-up-request' AND json_extract(payload,'$.commandId')=? LIMIT 1").get(command.commandId) as { payload: string } | undefined;
+        let next: string;
+        if (prior !== undefined) {
+          const stored = JSON.parse(prior.payload) as { from: string; text: string; next: string };
+          if (stored.from !== from || stored.text !== text.trim()) throw new Error("follow-up id reused for a different request");
+          next = stored.next;
+        } else {
+          const previous = this.snapshot(from);
+          // Separate contract and root: no inheritance of conversation or
+          // acceptance, only the currently selected route/project/limits.
+          this.db.exec("SAVEPOINT follow_up");
+          try {
+            next = this.createTask({ workspace: previous.workspace, objective: text.trim(), acceptance: [], provider: previous.provider, model: previous.model, baseUrl: previous.baseUrl,
+              budget: { calls: previous.budget.grantedCalls, tokens: previous.budget.grantedTokens } }).taskId;
+            this.recordEvent(next, "follow-up-request", { commandId: command.commandId, from, text: text.trim(), next });
+            this.db.exec("RELEASE follow_up");
+          } catch (error) { this.db.exec("ROLLBACK TO follow_up; RELEASE follow_up"); throw error; }
+        }
+        if (this.safeState(next) === "READY") {
+          try { this.startTask(next, command.commandId); } catch { /* Created task remains visible and retryable, never duplicate it. */ }
+        }
+        return { accepted: true, commandId: command.commandId, taskId: next, revision: this.safeRevision(next), state: this.safeState(next) };
+      }
       case "create-task": {
         const objective = payload["objective"];
         const provider = payload["provider"];
@@ -1211,12 +1246,12 @@ export class TaskManager {
 
   private readMessages(taskId: string): MessageView[] {
     const rows = this.db
-      .prepare("SELECT seq, payload, recorded_at FROM events WHERE task_id = ? AND kind = 'chat' ORDER BY seq ASC LIMIT 500")
+      .prepare("SELECT seq, payload, recorded_at FROM (SELECT seq, payload, recorded_at FROM events WHERE task_id = ? AND kind = 'chat' ORDER BY seq DESC LIMIT 500) ORDER BY seq ASC")
       .all(taskId) as Array<{ seq: number; payload: string; recorded_at: string }>;
     const messages: MessageView[] = [];
     for (const row of rows) {
       try {
-        const parsed = JSON.parse(row.payload) as { author?: unknown; text?: unknown; id?: unknown };
+        const parsed = JSON.parse(row.payload) as { author?: unknown; text?: unknown; id?: unknown; source?: unknown };
         if ((parsed.author === "user" || parsed.author === "agent" || parsed.author === "system") && typeof parsed.text === "string") {
           messages.push({
             id: typeof parsed.id === "string" ? parsed.id : `ev-${row.seq}`,
@@ -1224,6 +1259,7 @@ export class TaskManager {
             author: parsed.author,
             text: parsed.text,
             recordedAt: row.recorded_at,
+            ...(parsed.source === "model" || parsed.source === "verified" ? { source: parsed.source } : {}),
           });
         }
       } catch {

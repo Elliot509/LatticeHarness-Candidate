@@ -305,6 +305,7 @@ async function runResolvedLoop(
       runId,
       taskSurface,
       tools: buildToolset({
+        directoryOnly: acceptance.directoryOnly,
         supervisor,
         verifyTriggers:
           options.verifyExecutable !== undefined
@@ -342,6 +343,8 @@ async function runResolvedLoop(
       verifyAfterTools: acceptance.hasFilesystemPredicate,
       modelRef: { provider, providerId: resolved.providerName, model: resolved.model, endpoint: resolved.baseUrl ?? null },
       waiter,
+      beforeRequest: () => { if (acceptance.inventoryInstruction !== null && !taskSurface.obligations.includes(acceptance.inventoryInstruction)) taskSurface.obligations = [...taskSurface.obligations, acceptance.inventoryInstruction]; },
+      onModelText: (text, source = "model") => { recordTaskEvent(dbRaw, contract.taskId, "chat", { author: "agent", text, source }); emit(text); },
       onEvent: (event) => {
         if (event.kind === "tool-start") emit(`[tool] ${event.tool} started`);
         else if (event.kind === "tool-end") {

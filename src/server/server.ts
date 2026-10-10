@@ -82,7 +82,7 @@ function parseCommand(body: string): UiCommand {
   if (typeof parsed.commandId !== "string" || parsed.commandId === "") {
     throw new Error("commandId is required");
   }
-  const kinds = ["create-task", "start-task", "steer", "stop", "select-model", "set-key", "resume-task", "wake"];
+  const kinds = ["create-task", "follow-up-task", "start-task", "steer", "stop", "select-model", "set-key", "resume-task", "wake"];
   if (typeof parsed.kind !== "string" || !kinds.includes(parsed.kind)) {
     throw new Error("unknown command kind");
   }

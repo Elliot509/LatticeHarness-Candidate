@@ -34,6 +34,15 @@ function snapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
 }
 
 describe("ui reducer", () => {
+  it("refreshes the resume gate after BLOCKED without dropping UNKNOWN or permitting retry", () => {
+    let state = uiReducer(initialState, { type: "open-task", taskId: "task-1" });
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ resumeBlockers: ["active-runtime"] }) });
+    state = uiReducer(state, { type: "event", event: { seq: 4, kind: "state", state: "BLOCKED", reason: "model invocation UNKNOWN", contractRevision: 1 } });
+    expect(state.needsResync).toBe(true);
+    state = uiReducer(state, { type: "snapshot", snapshot: snapshot({ cut: 4, state: "BLOCKED", unknowns: 1, resumeBlockers: ["unresolved-unknown"], resumable: false }) });
+    expect(state.needsResync).toBe(false); expect(state.task?.resumeBlockers).not.toContain("active-runtime");
+    expect(state.task?.unknowns).toBe(1); expect(state.task?.resumable).toBe(false);
+  });
   it("removes rejected pending commands and restores a delayed draft to its original task", () => {
     let state = uiReducer(initialState, { type: "open-task", taskId: "task-1" });
     state = uiReducer(state, { type: "command-sent", command: { commandId: "c", kind: "steer", text: "draft", sentAt: 1 } });

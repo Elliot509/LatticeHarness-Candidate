@@ -22,6 +22,7 @@ export interface MessageView {
   id: string;
   seq: number;
   author: "user" | "agent" | "system";
+  source?: "model" | "verified";
   text: string;
   recordedAt: string;
 }
@@ -136,7 +137,7 @@ export type ContextUsage = ({ known: false; usedTokens?: number; contextWindow?:
   capacitySource?: "models-endpoint.context_length"; capacityKind?: "nominal";
 };
 
-export type CommandKind = "create-task" | "start-task" | "steer" | "stop" | "select-model" | "set-key" | "resume-task" | "wake";
+export type CommandKind = "create-task" | "follow-up-task" | "start-task" | "steer" | "stop" | "select-model" | "set-key" | "resume-task" | "wake";
 
 export interface UiCommand {
   commandId: string;

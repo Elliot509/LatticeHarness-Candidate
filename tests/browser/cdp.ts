@@ -176,7 +176,6 @@ export async function launchChromium(debugPort: number): Promise<ChromiumInstanc
     binary,
     [
       "--headless=new",
-      "--no-sandbox",
       "--disable-gpu",
       "--disable-dev-shm-usage",
       "--no-first-run",

@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../providers/types.js";
+import type { DirectoryPage } from "./directory.js";
 
 export type ToolStatus =
   | "completed"
@@ -23,6 +24,8 @@ export interface ToolResult {
   // Executor-produced identity of substantive observed output. Presentation
   // metadata (e.g. elapsed milliseconds) must not count as new progress.
   observationKey?: string;
+  directoryPage?: DirectoryPage;
+  progress?: { scope: string; version: string; items: string[] };
 }
 
 export interface ToolContext {

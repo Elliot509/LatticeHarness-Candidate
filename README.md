@@ -26,6 +26,8 @@ processes; the conversation is one view of that work.
   model switching. Active and pending selections are distinct.
 - A web UI and an Electron desktop shell with a native project chooser.
 - A context-window indicator tied to actual provider metadata and observed input.
+- Structured directory inventories with pagination and verified, persistent results.
+- Full final model responses, labeled separately from runtime-verified results.
 
 There is one execution engine. MCP, subagents, semantic memory, a universal planner
 and a general prompt-injection defense are not current capabilities. The retired
@@ -118,6 +120,13 @@ bundle and isolated launch instructions are delivered separately to its owner.
 8. Close and reopen to inspect retained history. Reenter the key for a new session.
    **Interromper** cancels work; it must not be interpreted as successful completion.
 
+The selected project also resolves local expressions such as `dentro deste
+ambiente`. After completion, **Enviar nova tarefa** creates a separate task in
+that project with the selected provider/model and configured limits. It does not
+send the previous conversation or inherit its acceptance criteria. Tool activity
+can be expanded to inspect arguments and captured results; successful execution
+groups are collapsed after verified completion.
+
 Local fixtures exercise tool use and verification without paid inference. A
 human-run OpenRouter trial with `meta/muse-spark-1.3-contributor` successfully
 completed the objective `Crie uma pasta chamada "Python" dentro desse lugar.`:
@@ -181,10 +190,23 @@ agent engine.
   content observations before/after execution and at completion. At least one
   passing test is required. Later edits invalidate the evidence.
 - `response`: an analysis answer; it certifies no filesystem correctness. An
-  editing/exec task needs appropriate verification instead.
+  explicit `response` criterion remains an answer-only obligation even after
+  exec/edit; add filesystem/test criteria when those effects must be certified.
 
-The verifier streams content asynchronously in 64 KiB buffers. There is no
-32 MiB or 10,000-entry cutoff. Path, type, mode, size and content digest have
+Recognized local inventory requests, such as `Me liste tudo que está nessa
+pasta.`, use `read` with `kind: "directory"`. Immediate children are the default;
+recursion must be requested. Hidden/generated entries are included, and symbolic
+links are listed without following their destinations. Every page must be
+retrieved before the runtime delivers a verified complete list. The metadata
+scan is bounded to 10,000 entries, about 2 MiB and at most five seconds; an
+incomplete scan cannot certify completeness. Cursors continue the original
+observation, not a fresh or atomic filesystem snapshot. Captured command output
+can also be expanded without rerunning the command, but bytes omitted by the
+executor cannot be recovered.
+
+The whole-project test-content verifier streams content asynchronously in 64 KiB
+buffers. Unlike directory inventory scans, it has no 32 MiB or 10,000-entry
+cutoff. Path, type, mode, size and content digest have
 unambiguous framing. Read/search observations do not rescan the whole project.
 Progress detection uses observed tool results/versions and confirmed edits;
 unrelated filesystem activity is not proof of productive work.
@@ -243,6 +265,22 @@ retention/scale, general late-usage reconciliation, external writers, detached
 processes, lost acknowledgments and some accessibility behavior need further
 hardening. Historical data is not silently repaired. See [SECURITY.md](SECURITY.md)
 for the current boundary and private vulnerability-reporting route.
+
+The Electron backend uses system-selected address connection behavior to avoid
+an observed embedded-Node automatic address-family connection failure. TLS and
+uncertain-request handling remain enabled; this is not an inference retry.
+Terminal state updates refresh the UI's resume gate so a stale `active-runtime`
+notice does not hide the actual uncertainty blocker.
+
+Known workflow limitations remain: guidance stored on a pre-inference
+`clarification-required` task does not resolve its criterion or restart it;
+create a new task with a clear objective or explicit criterion. Snapshots display
+the newest 500 chat messages, while older events remain in the ledger. LB-01
+(Composer reported disabled after `COMPLETED` in an educational campaign) is not
+considered closed: deterministic follow-up tests pass, but the reported campaign
+behavior still needs reconciliation. Real educational trials demonstrated
+reading, explanations and persistence; complex Python correction and material
+organization failed in that campaign. These capabilities are not guaranteed.
 
 ## Development
 
